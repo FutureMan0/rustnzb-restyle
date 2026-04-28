@@ -37,7 +37,6 @@ ARG RELEASE_OPTIMIZED=false
 # Build Rust binary (build.rs skips ng build since dist already exists)
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
     if [ "$RELEASE_OPTIMIZED" = "true" ]; then \
       export CARGO_PROFILE_RELEASE_LTO=fat \
              CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
