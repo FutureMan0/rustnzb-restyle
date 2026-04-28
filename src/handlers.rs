@@ -95,7 +95,7 @@ fn should_preempt_for_priority_change(state: &AppState, job_id: &str, new_priori
     priority_rank(new_priority) > priority_rank(existing.priority)
 }
 
-fn apply_priority_preemption(state: &AppState, target_id: &str, _target_priority: Priority) {
+fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority: Priority) {
     let qm = &state.queue_manager;
     if qm.is_paused() {
         tracing::info!(
@@ -122,23 +122,25 @@ fn apply_priority_preemption(state: &AppState, target_id: &str, _target_priority
         tracing::warn!(job_id = %target_id, error = %e, "Priority preemption: failed to move job to top");
     }
 
-    let hard_single_slot_mode = state.config().general.max_active_downloads <= 1;
-    if hard_single_slot_mode {
-        let jobs_now = qm.get_jobs();
-        let running_others: Vec<String> = jobs_now
-            .into_iter()
-            .filter(|job| job.id != target_id && job.status == JobStatus::Downloading)
-            .map(|job| job.id)
-            .collect();
-        for running_id in running_others {
-            if let Err(e) = qm.pause_job(&running_id) {
-                tracing::warn!(
-                    job_id = %target_id,
-                    running_job_id = %running_id,
-                    error = %e,
-                    "Priority preemption: failed to pause running job in single-slot mode"
-                );
-            }
+    let target_rank = priority_rank(target_priority);
+    let jobs_now = qm.get_jobs();
+    let running_others: Vec<String> = jobs_now
+        .into_iter()
+        .filter(|job| {
+            job.id != target_id
+                && job.status == JobStatus::Downloading
+                && priority_rank(job.priority) < target_rank
+        })
+        .map(|job| job.id)
+        .collect();
+    for running_id in running_others {
+        if let Err(e) = qm.pause_job(&running_id) {
+            tracing::warn!(
+                job_id = %target_id,
+                running_job_id = %running_id,
+                error = %e,
+                "Priority preemption: failed to pause lower-priority running job"
+            );
         }
     }
 
@@ -159,6 +161,49 @@ fn normalize_queue_job_for_response(job: &mut NzbJob) {
         }
         if job.downloaded_bytes > job.total_bytes {
             job.downloaded_bytes = job.total_bytes;
+        }
+    }
+}
+
+fn normalize_downloading_slots_for_response(jobs: &mut [NzbJob], max_active_downloads: usize) {
+    if max_active_downloads == 0 {
+        for job in jobs.iter_mut() {
+            if job.status == JobStatus::Downloading {
+                job.status = JobStatus::Queued;
+                job.speed_bps = 0;
+            }
+        }
+        return;
+    }
+
+    let downloading_indices: Vec<usize> = jobs
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, job)| (job.status == JobStatus::Downloading).then_some(idx))
+        .collect();
+
+    if downloading_indices.len() <= max_active_downloads {
+        return;
+    }
+
+    let mut ranked = downloading_indices;
+    ranked.sort_by(|a, b| {
+        let left = &jobs[*a];
+        let right = &jobs[*b];
+        right
+            .speed_bps
+            .cmp(&left.speed_bps)
+            .then_with(|| priority_rank(right.priority).cmp(&priority_rank(left.priority)))
+            .then_with(|| a.cmp(b))
+    });
+
+    let keep: std::collections::HashSet<usize> =
+        ranked.into_iter().take(max_active_downloads).collect();
+
+    for (idx, job) in jobs.iter_mut().enumerate() {
+        if job.status == JobStatus::Downloading && !keep.contains(&idx) {
+            job.status = JobStatus::Queued;
+            job.speed_bps = 0;
         }
     }
 }
@@ -265,6 +310,8 @@ pub async fn h_queue_list(
     for job in &mut all_jobs {
         normalize_queue_job_for_response(job);
     }
+    let max_active_downloads = state.config().general.max_active_downloads.max(1);
+    normalize_downloading_slots_for_response(&mut all_jobs, max_active_downloads);
     let total = all_jobs.len();
     let speed_bps = qm.get_speed();
     let paused = qm.is_paused();
