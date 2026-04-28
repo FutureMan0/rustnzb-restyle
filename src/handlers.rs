@@ -74,12 +74,21 @@ pub struct SetPriorityBody {
     pub priority: i32,
 }
 
-fn apply_force_preemption(state: &AppState, target_id: &str) {
+fn priority_rank(priority: Priority) -> u8 {
+    match priority {
+        Priority::Low => 0,
+        Priority::Normal => 1,
+        Priority::High => 2,
+        Priority::Force => 3,
+    }
+}
+
+fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority: Priority) {
     let qm = &state.queue_manager;
     if qm.is_paused() {
         tracing::info!(
             job_id = %target_id,
-            "Skipping force preemption because queue is globally paused"
+            "Skipping priority preemption because queue is globally paused"
         );
         return;
     }
@@ -88,7 +97,7 @@ fn apply_force_preemption(state: &AppState, target_id: &str) {
     let Some(target_job) = jobs.iter().find(|job| job.id == target_id) else {
         tracing::warn!(
             job_id = %target_id,
-            "Skipping force preemption because target job was not found in queue"
+            "Skipping priority preemption because target job was not found in queue"
         );
         return;
     };
@@ -97,15 +106,23 @@ fn apply_force_preemption(state: &AppState, target_id: &str) {
         return;
     }
 
+    let target_rank = priority_rank(target_priority);
     if let Err(e) = qm.move_job(target_id, 0) {
-        tracing::warn!(job_id = %target_id, error = %e, "Force preemption: failed to move job to top");
+        tracing::warn!(job_id = %target_id, error = %e, "Priority preemption: failed to move job to top");
     }
 
     let running_ids: Vec<String> = jobs
         .into_iter()
-        .filter(|job| job.status == JobStatus::Downloading && job.id != target_id)
+        .filter(|job| {
+            job.status == JobStatus::Downloading
+                && job.id != target_id
+                && priority_rank(job.priority) < target_rank
+        })
         .map(|job| job.id)
         .collect();
+    if running_ids.is_empty() {
+        return;
+    }
 
     let mut temporarily_paused = Vec::new();
     for running_id in running_ids {
@@ -115,7 +132,7 @@ fn apply_force_preemption(state: &AppState, target_id: &str) {
                 job_id = %target_id,
                 running_job_id = %running_id,
                 error = %e,
-                "Force preemption: failed to pause running job"
+                "Priority preemption: failed to pause running job"
             ),
         }
     }
@@ -124,7 +141,7 @@ fn apply_force_preemption(state: &AppState, target_id: &str) {
         tracing::warn!(
             job_id = %target_id,
             error = %e,
-            "Force preemption: failed to resume force-priority job"
+            "Priority preemption: failed to resume higher-priority job"
         );
     }
 
@@ -134,7 +151,7 @@ fn apply_force_preemption(state: &AppState, target_id: &str) {
                 job_id = %target_id,
                 paused_job_id = %paused_id,
                 error = %e,
-                "Force preemption: failed to requeue previously running job"
+                "Priority preemption: failed to requeue previously running job"
             );
         }
     }
@@ -412,9 +429,7 @@ pub async fn h_queue_set_priority(
         .queue_manager
         .set_job_priority(&id, priority)
         .map_err(ApiError::from)?;
-    if priority == Priority::Force {
-        apply_force_preemption(&state, &id);
-    }
+    apply_priority_preemption(&state, &id, priority);
     Ok(Json(SimpleResponse { status: true }))
 }
 
@@ -1525,25 +1540,31 @@ pub async fn h_server_stats(
 fn get_disk_space_free_via_df(path: &std::path::Path) -> Option<u64> {
     use std::process::Command;
 
-    let output = Command::new("df")
-        .arg("-B1")
-        .arg("--output=avail")
-        .arg(path)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    fn parse_df_avail(stdout: &str, multiplier: u64) -> Option<u64> {
+        let line = stdout.lines().rev().find(|line| !line.trim().is_empty())?;
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 4 {
+            return None;
+        }
+        let avail_idx = cols.len().saturating_sub(3);
+        let avail = cols.get(avail_idx)?.parse::<u64>().ok()?;
+        Some(avail.saturating_mul(multiplier))
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let avail = stdout
-        .lines()
-        .skip(1)
-        .map(str::trim)
-        .find(|line| !line.is_empty())?
-        .parse::<u64>()
-        .ok()?;
-    Some(avail)
+    let output_b1 = Command::new("df").arg("-B1").arg(path).output().ok()?;
+    if output_b1.status.success() {
+        let stdout = String::from_utf8_lossy(&output_b1.stdout);
+        if let Some(bytes) = parse_df_avail(&stdout, 1) {
+            return Some(bytes);
+        }
+    }
+
+    let output_kb = Command::new("df").arg(path).output().ok()?;
+    if !output_kb.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output_kb.stdout);
+    parse_df_avail(&stdout, 1024)
 }
 
 /// Get free disk space for a path (returns 0 on error).
@@ -1693,7 +1714,21 @@ pub async fn h_queue_bulk_action(
     let mut succeeded = 0usize;
     let mut failed = 0usize;
 
-    for id in &body.ids {
+    let ids_ordered: Vec<String> = if body.action == "priority" {
+        let order: std::collections::HashMap<String, usize> = qm
+            .get_jobs()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, job)| (job.id, idx))
+            .collect();
+        let mut ids = body.ids.clone();
+        ids.sort_by_key(|id| order.get(id).copied().unwrap_or(usize::MAX));
+        ids
+    } else {
+        body.ids.clone()
+    };
+
+    for id in &ids_ordered {
         let result = match body.action.as_str() {
             "pause" => qm.pause_job(id),
             "resume" => qm.resume_job(id),
@@ -1707,8 +1742,8 @@ pub async fn h_queue_bulk_action(
                     _ => Priority::Normal,
                 };
                 let set_result = qm.set_job_priority(id, priority);
-                if set_result.is_ok() && priority == Priority::Force {
-                    apply_force_preemption(&state, id);
+                if set_result.is_ok() {
+                    apply_priority_preemption(&state, id, priority);
                 }
                 set_result
             }
