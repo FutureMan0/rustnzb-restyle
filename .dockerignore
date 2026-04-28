@@ -2,6 +2,11 @@ target/
 frontend/dist/
 frontend/node_modules/
 frontend/.angular/
+e2e/
+e2e/playwright-report/
+website/
+desktop/
+benchnzb/
 TestData/
 data/
 downloads/

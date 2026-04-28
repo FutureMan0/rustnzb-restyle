@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.88-alpine3.21 AS builder
 
 RUN apk add --no-cache musl-dev build-base protoc openssl-dev openssl-libs-static curl nodejs npm git
@@ -6,7 +7,8 @@ WORKDIR /build
 
 # Install Angular dependencies first (cached layer)
 COPY frontend/package.json frontend/package-lock.json frontend/
-RUN cd frontend && npm ci
+RUN --mount=type=cache,target=/root/.npm \
+    cd frontend && npm ci
 
 # Copy frontend source and build
 COPY frontend frontend
@@ -15,7 +17,6 @@ RUN cd frontend && npx ng build --configuration=production
 # Copy Rust source
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
-COPY tests tests
 
 # Configure git + cargo registry for private Forgejo deps
 ARG GIT_AUTH_TOKEN
@@ -34,7 +35,10 @@ RUN sed -i '/^\[patch\./,/^$/d' Cargo.toml
 ARG RELEASE_OPTIMIZED=false
 
 # Build Rust binary (build.rs skips ng build since dist already exists)
-RUN if [ "$RELEASE_OPTIMIZED" = "true" ]; then \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    if [ "$RELEASE_OPTIMIZED" = "true" ]; then \
       export CARGO_PROFILE_RELEASE_LTO=fat \
              CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
              CARGO_PROFILE_RELEASE_STRIP=symbols; \

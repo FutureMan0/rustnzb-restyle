@@ -24,6 +24,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up QEMU
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -52,11 +53,15 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=rustnzb-main
+            type=gha,scope=rustnzb-${{ github.ref_name }}
+          cache-to: type=gha,scope=rustnzb-${{ github.ref_name }},mode=max
           build-args: |
-            RELEASE_OPTIMIZED=true
+            RELEASE_OPTIMIZED=${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'true' || 'false' }}
             GIT_AUTH_TOKEN=${{ secrets.FORGEJO_TOKEN }}
             PLUGIN_PASSWORD=${{ secrets.FORGEJO_TOKEN }}

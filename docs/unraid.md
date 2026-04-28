@@ -28,6 +28,7 @@ Wenn du dieses Repo unter `FutureMan0` verwendest, ist der Owner typischerweise 
 ### 4) Updates in Unraid
 
 Wenn du das CA-Template auf `:latest` nutzt, erkennt Unraid neue Image-Digests über **Check for Updates** und kann aktualisieren.
+Tag-Strategie: `latest` folgt dem `main`-Branch; versionierte Builds kommen über Git-Tags wie `v1.2.3`.
 
 ### 5) Beispiel mit Docker Compose
 
