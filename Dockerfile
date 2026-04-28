@@ -8,7 +8,7 @@ WORKDIR /build
 # Install Angular dependencies first (cached layer)
 COPY frontend/package.json frontend/package-lock.json frontend/
 RUN --mount=type=cache,target=/root/.npm \
-    cd frontend && npm ci
+    cd frontend && npm ci --no-audit --no-fund
 
 # Copy frontend source and build
 COPY frontend frontend
