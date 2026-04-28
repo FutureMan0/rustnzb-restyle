@@ -74,6 +74,72 @@ pub struct SetPriorityBody {
     pub priority: i32,
 }
 
+fn apply_force_preemption(state: &AppState, target_id: &str) {
+    let qm = &state.queue_manager;
+    if qm.is_paused() {
+        tracing::info!(
+            job_id = %target_id,
+            "Skipping force preemption because queue is globally paused"
+        );
+        return;
+    }
+
+    let jobs = qm.get_jobs();
+    let Some(target_job) = jobs.iter().find(|job| job.id == target_id) else {
+        tracing::warn!(
+            job_id = %target_id,
+            "Skipping force preemption because target job was not found in queue"
+        );
+        return;
+    };
+
+    if target_job.status == JobStatus::Downloading {
+        return;
+    }
+
+    if let Err(e) = qm.move_job(target_id, 0) {
+        tracing::warn!(job_id = %target_id, error = %e, "Force preemption: failed to move job to top");
+    }
+
+    let running_ids: Vec<String> = jobs
+        .into_iter()
+        .filter(|job| job.status == JobStatus::Downloading && job.id != target_id)
+        .map(|job| job.id)
+        .collect();
+
+    let mut temporarily_paused = Vec::new();
+    for running_id in running_ids {
+        match qm.pause_job(&running_id) {
+            Ok(()) => temporarily_paused.push(running_id),
+            Err(e) => tracing::warn!(
+                job_id = %target_id,
+                running_job_id = %running_id,
+                error = %e,
+                "Force preemption: failed to pause running job"
+            ),
+        }
+    }
+
+    if let Err(e) = qm.resume_job(target_id) {
+        tracing::warn!(
+            job_id = %target_id,
+            error = %e,
+            "Force preemption: failed to resume force-priority job"
+        );
+    }
+
+    for paused_id in temporarily_paused {
+        if let Err(e) = qm.resume_job(&paused_id) {
+            tracing::warn!(
+                job_id = %target_id,
+                paused_job_id = %paused_id,
+                error = %e,
+                "Force preemption: failed to requeue previously running job"
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -346,6 +412,9 @@ pub async fn h_queue_set_priority(
         .queue_manager
         .set_job_priority(&id, priority)
         .map_err(ApiError::from)?;
+    if priority == Priority::Force {
+        apply_force_preemption(&state, &id);
+    }
     Ok(Json(SimpleResponse { status: true }))
 }
 
@@ -1451,6 +1520,32 @@ pub async fn h_server_stats(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Fallback for Unix systems where statvfs can report 0 on FUSE/shfs mounts.
+#[cfg(unix)]
+fn get_disk_space_free_via_df(path: &std::path::Path) -> Option<u64> {
+    use std::process::Command;
+
+    let output = Command::new("df")
+        .arg("-B1")
+        .arg("--output=avail")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let avail = stdout
+        .lines()
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .parse::<u64>()
+        .ok()?;
+    Some(avail)
+}
+
 /// Get free disk space for a path (returns 0 on error).
 fn get_disk_space_free(path: &std::path::Path) -> u64 {
     #[cfg(unix)]
@@ -1466,13 +1561,21 @@ fn get_disk_space_free(path: &std::path::Path) -> u64 {
             if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) == 0 {
                 let stat = stat.assume_init();
                 #[allow(clippy::unnecessary_cast)] // u32 on macOS, u64 on Linux
-                return stat.f_bavail as u64 * stat.f_frsize as u64;
+                let free_bytes = stat.f_bavail as u64 * stat.f_frsize as u64;
+                if free_bytes > 0 {
+                    return free_bytes;
+                }
+                if let Some(df_bytes) = get_disk_space_free_via_df(path) {
+                    return df_bytes;
+                }
+                return 0;
             }
         }
-        0
+        get_disk_space_free_via_df(path).unwrap_or(0)
     }
     #[cfg(not(unix))]
     {
+        let _ = path;
         0
     }
 }
@@ -1603,7 +1706,11 @@ pub async fn h_queue_bulk_action(
                     3 => Priority::Force,
                     _ => Priority::Normal,
                 };
-                qm.set_job_priority(id, priority)
+                let set_result = qm.set_job_priority(id, priority);
+                if set_result.is_ok() && priority == Priority::Force {
+                    apply_force_preemption(&state, id);
+                }
+                set_result
             }
             "category" => {
                 let cat = body.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
