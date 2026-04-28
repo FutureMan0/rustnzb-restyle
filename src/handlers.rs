@@ -83,7 +83,19 @@ fn priority_rank(priority: Priority) -> u8 {
     }
 }
 
-fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority: Priority) {
+fn should_preempt_for_priority_change(state: &AppState, job_id: &str, new_priority: Priority) -> bool {
+    let Some(existing) = state
+        .queue_manager
+        .get_jobs()
+        .into_iter()
+        .find(|j| j.id == job_id)
+    else {
+        return false;
+    };
+    priority_rank(new_priority) > priority_rank(existing.priority)
+}
+
+fn apply_priority_preemption(state: &AppState, target_id: &str, _target_priority: Priority) {
     let qm = &state.queue_manager;
     if qm.is_paused() {
         tracing::info!(
@@ -106,34 +118,27 @@ fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority:
         return;
     }
 
-    let target_rank = priority_rank(target_priority);
     if let Err(e) = qm.move_job(target_id, 0) {
         tracing::warn!(job_id = %target_id, error = %e, "Priority preemption: failed to move job to top");
     }
 
-    let running_ids: Vec<String> = jobs
-        .into_iter()
-        .filter(|job| {
-            job.status == JobStatus::Downloading
-                && job.id != target_id
-                && priority_rank(job.priority) < target_rank
-        })
-        .map(|job| job.id)
-        .collect();
-    if running_ids.is_empty() {
-        return;
-    }
-
-    let mut temporarily_paused = Vec::new();
-    for running_id in running_ids {
-        match qm.pause_job(&running_id) {
-            Ok(()) => temporarily_paused.push(running_id),
-            Err(e) => tracing::warn!(
-                job_id = %target_id,
-                running_job_id = %running_id,
-                error = %e,
-                "Priority preemption: failed to pause running job"
-            ),
+    let hard_single_slot_mode = state.config().general.max_active_downloads <= 1;
+    if hard_single_slot_mode {
+        let jobs_now = qm.get_jobs();
+        let running_others: Vec<String> = jobs_now
+            .into_iter()
+            .filter(|job| job.id != target_id && job.status == JobStatus::Downloading)
+            .map(|job| job.id)
+            .collect();
+        for running_id in running_others {
+            if let Err(e) = qm.pause_job(&running_id) {
+                tracing::warn!(
+                    job_id = %target_id,
+                    running_job_id = %running_id,
+                    error = %e,
+                    "Priority preemption: failed to pause running job in single-slot mode"
+                );
+            }
         }
     }
 
@@ -143,17 +148,6 @@ fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority:
             error = %e,
             "Priority preemption: failed to resume higher-priority job"
         );
-    }
-
-    for paused_id in temporarily_paused {
-        if let Err(e) = qm.resume_job(&paused_id) {
-            tracing::warn!(
-                job_id = %target_id,
-                paused_job_id = %paused_id,
-                error = %e,
-                "Priority preemption: failed to requeue previously running job"
-            );
-        }
     }
 }
 
@@ -435,6 +429,7 @@ pub async fn h_queue_set_priority(
     Path(id): Path<String>,
     Json(body): Json<SetPriorityBody>,
 ) -> Result<Json<SimpleResponse>, ApiError> {
+    let qm = &state.queue_manager;
     let priority = match body.priority {
         0 => Priority::Low,
         1 => Priority::Normal,
@@ -442,11 +437,11 @@ pub async fn h_queue_set_priority(
         3 => Priority::Force,
         _ => return Err(ApiError::from(anyhow::anyhow!("Invalid priority value"))),
     };
-    state
-        .queue_manager
-        .set_job_priority(&id, priority)
-        .map_err(ApiError::from)?;
-    apply_priority_preemption(&state, &id, priority);
+    let should_preempt = should_preempt_for_priority_change(&state, &id, priority);
+    qm.set_job_priority(&id, priority).map_err(ApiError::from)?;
+    if should_preempt {
+        apply_priority_preemption(&state, &id, priority);
+    }
     Ok(Json(SimpleResponse { status: true }))
 }
 
@@ -1760,8 +1755,9 @@ pub async fn h_queue_bulk_action(
                     3 => Priority::Force,
                     _ => Priority::Normal,
                 };
+                let should_preempt = should_preempt_for_priority_change(&state, id, priority);
                 let set_result = qm.set_job_priority(id, priority);
-                if set_result.is_ok() {
+                if set_result.is_ok() && should_preempt {
                     apply_priority_preemption(&state, id, priority);
                 }
                 set_result
