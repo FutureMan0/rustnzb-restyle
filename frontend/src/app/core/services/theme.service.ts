@@ -60,7 +60,7 @@ export class ThemeService {
       'barbie',
       'plex',
     ];
-    return v && valid.includes(v) ? v : 'purple';
+    return v && valid.includes(v) ? v : 'plex';
   }
 
   private apply(): void {

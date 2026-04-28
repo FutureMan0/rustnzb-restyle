@@ -78,6 +78,17 @@ Open `http://localhost:9090` and add your NNTP servers via the web UI.
 git clone https://github.com/FutureMan0/rustnzb-restyle.git
 cd rustnzb-restyle
 cp config.example.toml config.toml
+COMPOSE_PROFILES=direct docker compose up -d
+```
+
+ProtonVPN via Gluetun (Kill-Switch):
+
+```bash
+COMPOSE_PROFILES=vpn \
+RUSTNZB_VPN_ENABLED=true \
+RUSTNZB_VPN_PROVIDER=protonvpn \
+RUSTNZB_VPN_TRANSPORT=wireguard \
+RUSTNZB_VPN_PROFILE=nl \
 docker compose up -d
 ```
 
@@ -172,6 +183,10 @@ Most settings can be configured through the web UI. See [`config.example.toml`](
 | `RUSTNZB_CONFIG` | Config file path |
 | `RUSTNZB_PORT` | Listen port |
 | `RUSTNZB_LOG_LEVEL` | Log level (trace/debug/info/warn/error) |
+| `RUSTNZB_VPN_ENABLED` | VPN mode override (`true`/`false`) |
+| `RUSTNZB_VPN_PROVIDER` | VPN provider override (e.g. `protonvpn`) |
+| `RUSTNZB_VPN_TRANSPORT` | VPN transport override (`wireguard`/`openvpn`) |
+| `RUSTNZB_VPN_PROFILE` | VPN region/profile override (e.g. `nl`) |
 | `OTEL_ENABLED` | Enable OpenTelemetry |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint |
 

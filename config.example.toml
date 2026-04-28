@@ -1,7 +1,7 @@
 [general]
 listen_addr = "0.0.0.0"
 port = 8080
-# api_key = "your-secret-api-key-here"
+api_key = "change-me"
 incomplete_dir = "/downloads/incomplete"
 complete_dir = "/downloads/complete"
 data_dir = "/data"
@@ -45,6 +45,21 @@ log_level = "info"
 # retention = 1000
 # pipelining = 1
 # optional = true
+
+# VPN orchestration hint for container deployments.
+# This section does not establish a tunnel itself; it defines desired runtime mode.
+# Effective priority: CLI args > ENV > TOML > defaults.
+[vpn]
+enabled = false
+provider = "protonvpn"
+transport = "wireguard" # or "openvpn"
+profile = "nl"
+
+# Optional ENV overrides:
+# RUSTNZB_VPN_ENABLED=true|false
+# RUSTNZB_VPN_PROVIDER=protonvpn
+# RUSTNZB_VPN_TRANSPORT=wireguard|openvpn
+# RUSTNZB_VPN_PROFILE=nl
 
 # Download categories
 [[categories]]

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -11,6 +11,79 @@ use nzb_web::nzb_core::config::AppConfig;
 use nzb_web::{LogBuffer, LogBufferLayer, StartupConfig};
 
 use rustnzb::handlers;
+
+#[derive(Debug, Clone)]
+struct VpnRuntimeConfig {
+    enabled: bool,
+    provider: String,
+    transport: String,
+    profile: String,
+}
+
+impl Default for VpnRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "protonvpn".to_string(),
+            transport: "wireguard".to_string(),
+            profile: "nl".to_string(),
+        }
+    }
+}
+
+fn parse_bool_env(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn read_vpn_runtime_config(config_path: &Path) -> VpnRuntimeConfig {
+    let mut vpn = VpnRuntimeConfig::default();
+
+    if let Ok(raw) = std::fs::read_to_string(config_path) {
+        if let Ok(doc) = raw.parse::<toml::Value>() {
+            if let Some(table) = doc.get("vpn").and_then(toml::Value::as_table) {
+                if let Some(enabled) = table.get("enabled").and_then(toml::Value::as_bool) {
+                    vpn.enabled = enabled;
+                }
+                if let Some(provider) = table.get("provider").and_then(toml::Value::as_str) {
+                    vpn.provider = provider.trim().to_string();
+                }
+                if let Some(transport) = table.get("transport").and_then(toml::Value::as_str) {
+                    vpn.transport = transport.trim().to_string();
+                }
+                if let Some(profile) = table.get("profile").and_then(toml::Value::as_str) {
+                    vpn.profile = profile.trim().to_string();
+                }
+            }
+        }
+    }
+
+    if let Ok(value) = std::env::var("RUSTNZB_VPN_ENABLED") {
+        if let Some(parsed) = parse_bool_env(&value) {
+            vpn.enabled = parsed;
+        }
+    }
+    if let Ok(value) = std::env::var("RUSTNZB_VPN_PROVIDER") {
+        if !value.trim().is_empty() {
+            vpn.provider = value.trim().to_string();
+        }
+    }
+    if let Ok(value) = std::env::var("RUSTNZB_VPN_TRANSPORT") {
+        if !value.trim().is_empty() {
+            vpn.transport = value.trim().to_string();
+        }
+    }
+    if let Ok(value) = std::env::var("RUSTNZB_VPN_PROFILE") {
+        if !value.trim().is_empty() {
+            vpn.profile = value.trim().to_string();
+        }
+    }
+
+    vpn
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "rustnzb", version, about = "Usenet NZB download client")]
@@ -174,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("Failed to install rustls CryptoProvider");
 
     let args = Args::parse();
+    let vpn_runtime = read_vpn_runtime_config(&args.config);
 
     if args.smoke_test {
         std::process::exit(run_smoke_tests());
@@ -239,6 +313,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("rustnzb v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "VPN runtime mode: enabled={}, provider={}, transport={}, profile={}",
+        vpn_runtime.enabled, vpn_runtime.provider, vpn_runtime.transport, vpn_runtime.profile
+    );
+    if vpn_runtime.enabled {
+        info!(
+            "VPN mode is enabled; run rustnzb behind a VPN gateway container (for example Gluetun with ProtonVPN)"
+        );
+    } else {
+        info!("VPN mode is disabled; rustnzb uses the container/host default network path");
+    }
 
     // If OTEL metrics enabled, spawn a metrics reporter
     if config.otel.enabled && _otel_meter_provider.is_some() {

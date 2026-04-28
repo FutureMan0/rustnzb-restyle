@@ -615,7 +615,10 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
     .tbl-scroll {
       max-width: 100%;
       overflow-x: auto;
+      overflow-y: visible;
       -webkit-overflow-scrolling: touch;
+      overscroll-behavior-x: contain;
+      padding-bottom: 4px;
     }
     :host ::ng-deep .tbl-queue {
       table-layout: fixed;
@@ -1037,6 +1040,16 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
     /* Mobile: remove horizontal scroll by hiding low-signal columns. */
     @media (max-width: 720px) {
       :host { font-size: 11px; }
+
+      .queue-tasks-panel {
+        overflow: visible;
+      }
+      .queue-tasks-panel .body.flush.tbl-wrap {
+        padding-bottom: calc(16px + env(safe-area-inset-bottom, 0));
+      }
+      .tbl-scroll {
+        padding-bottom: 14px;
+      }
 
       :host ::ng-deep .tbl-queue {
         min-width: 0;

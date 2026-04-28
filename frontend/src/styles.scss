@@ -76,7 +76,7 @@ html {
 /* Default: dark (bestehende Nutzer) */
 :root {
   @include dark-palette;
-  --tint: #a855f7;
+  --tint: #e5a00d;
   --card-elev-oled: 0 0 0 1px var(--line);
   --radius-card: 16px;
   --radius-pill: 999px;

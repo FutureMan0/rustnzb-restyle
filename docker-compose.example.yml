@@ -1,5 +1,6 @@
 services:
   rustnzb:
+    profiles: [direct]
     image: ghcr.io/${RUSTNZB_GHCR_OWNER:-REPLACE_ME}/${RUSTNZB_IMAGE_NAME:-rustnzb-restyle}:latest
     container_name: rustnzb
     restart: unless-stopped
@@ -10,6 +11,55 @@ services:
       PGID: "1000"
       TZ: "Australia/Sydney"
       RUST_LOG: "info"
+    volumes:
+      - rustnzb-config:/config
+      - rustnzb-data:/data
+      - /path/to/downloads:/downloads
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  gluetun:
+    profiles: [vpn]
+    image: qmcgaw/gluetun:latest
+    container_name: rustnzb-gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - "9090:9090"
+    environment:
+      VPN_SERVICE_PROVIDER: "protonvpn"
+      VPN_TYPE: "${RUSTNZB_VPN_TRANSPORT:-wireguard}"
+      SERVER_COUNTRIES: "${RUSTNZB_VPN_PROFILE:-NL}"
+      # Secrets only through ENV variables:
+      # - Proton OpenVPN: OPENVPN_USER / OPENVPN_PASSWORD
+      # - Proton WireGuard: WIREGUARD_PRIVATE_KEY / WIREGUARD_ADDRESSES
+      FIREWALL: "on"
+    volumes:
+      - rustnzb-config:/config
+
+  rustnzb-vpn:
+    profiles: [vpn]
+    image: ghcr.io/${RUSTNZB_GHCR_OWNER:-REPLACE_ME}/${RUSTNZB_IMAGE_NAME:-rustnzb-restyle}:latest
+    container_name: rustnzb
+    restart: unless-stopped
+    network_mode: "service:gluetun"
+    depends_on:
+      - gluetun
+    environment:
+      PUID: "1000"
+      PGID: "1000"
+      TZ: "Australia/Sydney"
+      RUST_LOG: "info"
+      RUSTNZB_VPN_ENABLED: "true"
+      RUSTNZB_VPN_PROVIDER: "protonvpn"
+      RUSTNZB_VPN_TRANSPORT: "${RUSTNZB_VPN_TRANSPORT:-wireguard}"
+      RUSTNZB_VPN_PROFILE: "${RUSTNZB_VPN_PROFILE:-nl}"
     volumes:
       - rustnzb-config:/config
       - rustnzb-data:/data
