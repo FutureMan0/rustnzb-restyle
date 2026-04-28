@@ -2,7 +2,8 @@ import { Component, DestroyRef, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { MatBottomSheetRef, MAT_BOTTOM_SHEET_DATA, MatBottomSheetModule } from '@angular/material/bottom-sheet';
-import { timer, switchMap } from 'rxjs';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { Observable, finalize, switchMap, timer } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
 import { NzbJob, QueueResponse } from '../../core/models/queue.model';
 
@@ -15,7 +16,7 @@ export interface QueueJobSheetData {
 @Component({
   selector: 'app-queue-job-sheet',
   standalone: true,
-  imports: [CommonModule, MatBottomSheetModule],
+  imports: [CommonModule, MatBottomSheetModule, MatSnackBarModule],
   template: `
     <div class="sheet-wrap">
       <div class="sheet-handle" aria-hidden="true"></div>
@@ -31,7 +32,7 @@ export interface QueueJobSheetData {
           <span class="ring-pct tabular-nums">{{ percent(job()) }}%</span>
         </div>
         <div class="header-text">
-          <span class="caption-label">{{ displayStatus(job().status) }}</span>
+          <span class="caption-label">{{ displayStatus(effectiveStatus(job())) }}</span>
           <h2 class="title">{{ job().name }}</h2>
           <div class="bullet-row">
             <span class="tabular-nums">{{ formatBytes(job().total_bytes) }}</span>
@@ -42,12 +43,12 @@ export interface QueueJobSheetData {
       </div>
 
       <div class="actions">
-        @if (job().status === 'paused') {
-          <button type="button" class="btn primary" (click)="resume()">Resume</button>
-        } @else if (job().status === 'downloading' || isPostProc(job().status) || job().status === 'queued') {
-          <button type="button" class="btn" (click)="pause()">Pause</button>
+        @if (effectiveStatus(job()) === 'paused') {
+          <button type="button" class="btn primary" [disabled]="actionPending()" (click)="resume()">Resume</button>
+        } @else if (effectiveStatus(job()) === 'downloading' || isPostProc(effectiveStatus(job())) || effectiveStatus(job()) === 'queued') {
+          <button type="button" class="btn" [disabled]="actionPending()" (click)="pause()">Pause</button>
         }
-        <button type="button" class="btn danger" (click)="remove()">Remove</button>
+        <button type="button" class="btn danger" [disabled]="actionPending()" (click)="remove()">Remove</button>
       </div>
 
       <h3 class="section-h">Priority</h3>
@@ -130,7 +131,7 @@ export interface QueueJobSheetData {
         </div>
         <div class="info-row">
           <span>ETA</span>
-          <span class="tabular-nums">{{ job().speed_bps > 0 ? eta(job()) : '—' }}</span>
+          <span class="tabular-nums">{{ shouldShowLiveMetrics(job()) ? eta(job()) : '—' }}</span>
         </div>
         <div class="info-row">
           <span>Added</span>
@@ -421,12 +422,14 @@ export interface QueueJobSheetData {
 export class QueueJobSheetComponent {
   private ref = inject(MatBottomSheetRef<QueueJobSheetComponent, string | void>);
   private api = inject(ApiService);
+  private snackBar = inject(MatSnackBar);
   private data = inject<QueueJobSheetData>(MAT_BOTTOM_SHEET_DATA);
   private destroyRef = inject(DestroyRef);
 
   readonly job = signal<NzbJob>(this.data.job);
   readonly queueIndex = signal(this.data.index);
   readonly total = signal(this.data.total);
+  readonly actionPending = signal(false);
 
   readonly priorityLevels = [
     { v: 0, label: 'Low' },
@@ -515,9 +518,24 @@ export class QueueJobSheetComponent {
     return ['verifying', 'repairing', 'extracting'].includes(status);
   }
 
+  effectiveStatus(job: NzbJob): string {
+    const remaining = this.remainingForJob(job);
+    if (remaining === 0 && (job.status === 'downloading' || job.status === 'queued')) {
+      return 'completed';
+    }
+    return job.status;
+  }
+
+  shouldShowLiveMetrics(job: NzbJob): boolean {
+    const status = this.effectiveStatus(job);
+    return status === 'downloading' || this.isPostProc(status);
+  }
+
   percent(job: { total_bytes: number; downloaded_bytes: number }): number {
-    if (job.total_bytes === 0) return 0;
-    return Math.round((job.downloaded_bytes / job.total_bytes) * 100);
+    const total = this.normalizeNonNegative(job.total_bytes);
+    if (total <= 0) return 0;
+    const downloaded = this.normalizeNonNegative(job.downloaded_bytes);
+    return Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)));
   }
 
   displayStatus(status: string): string {
@@ -532,17 +550,19 @@ export class QueueJobSheetComponent {
   }
 
   formatBytes(bytes: number): string {
-    if (bytes === 0) return '0 B';
+    const safe = this.normalizeNonNegative(bytes);
+    if (safe === 0) return '0 B';
     const k = 1024;
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const i = Math.min(4, Math.floor(Math.log(bytes) / Math.log(k)));
-    return (bytes / Math.pow(k, i)).toFixed(1) + ' ' + units[i];
+    const i = Math.min(4, Math.floor(Math.log(safe) / Math.log(k)));
+    return (safe / Math.pow(k, i)).toFixed(1) + ' ' + units[i];
   }
 
   eta(job: NzbJob): string {
-    if (job.speed_bps === 0) return '—';
-    const rem = job.total_bytes - job.downloaded_bytes;
-    const secs = rem / job.speed_bps;
+    const speed = this.normalizeNonNegative(job.speed_bps);
+    if (speed <= 0) return '—';
+    const secs = this.remainingForJob(job) / speed;
+    if (!Number.isFinite(secs) || secs <= 0) return '—';
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const s = Math.floor(secs % 60);
@@ -553,12 +573,7 @@ export class QueueJobSheetComponent {
 
   setPriority(priority: number): void {
     const id = this.job().id;
-    this.api.put(`/queue/${id}/priority`, { priority }).subscribe({
-      next: () => {
-        this.ref.dismiss('refresh');
-      },
-      error: () => {},
-    });
+    this.withPendingAction(this.api.put(`/queue/${id}/priority`, { priority }), 'Priority updated');
   }
 
   moveTo(kind: 'top' | 'up' | 'down' | 'bottom'): void {
@@ -571,21 +586,44 @@ export class QueueJobSheetComponent {
     else if (kind === 'bottom') position = n - 1;
     else if (kind === 'up') position = Math.max(0, cur - 1);
     else if (kind === 'down') position = Math.min(n - 1, cur + 1);
-    this.api.post(`/queue/${id}/move`, { position }).subscribe({
-      next: () => {
-        this.ref.dismiss('refresh');
-      },
-      error: () => {},
-    });
+    this.withPendingAction(this.api.post(`/queue/${id}/move`, { position }), 'Queue position updated');
   }
 
   pause(): void {
-    this.api.post(`/queue/${this.job().id}/pause`).subscribe(() => this.ref.dismiss('refresh'));
+    this.withPendingAction(this.api.post(`/queue/${this.job().id}/pause`), 'Job paused');
   }
   resume(): void {
-    this.api.post(`/queue/${this.job().id}/resume`).subscribe(() => this.ref.dismiss('refresh'));
+    this.withPendingAction(this.api.post(`/queue/${this.job().id}/resume`), 'Job resumed');
   }
   remove(): void {
-    this.api.delete(`/queue/${this.job().id}`).subscribe(() => this.ref.dismiss('refresh'));
+    this.withPendingAction(this.api.delete(`/queue/${this.job().id}`), 'Job removed');
+  }
+
+  private normalizeNonNegative(value: unknown): number {
+    const num = typeof value === 'number' ? value : Number(value ?? 0);
+    if (!Number.isFinite(num) || num < 0) return 0;
+    return num;
+  }
+
+  private remainingForJob(job: Pick<NzbJob, 'total_bytes' | 'downloaded_bytes'>): number {
+    const total = this.normalizeNonNegative(job.total_bytes);
+    const downloaded = this.normalizeNonNegative(job.downloaded_bytes);
+    return Math.max(0, total - downloaded);
+  }
+
+  private withPendingAction(action: Observable<unknown>, successMessage: string): void {
+    if (this.actionPending()) return;
+    this.actionPending.set(true);
+    action
+      .pipe(finalize(() => this.actionPending.set(false)))
+      .subscribe({
+        next: () => {
+          this.snackBar.open(successMessage, 'Close', { duration: 1800 });
+          this.ref.dismiss('refresh');
+        },
+        error: () => {
+          this.snackBar.open('Action failed. Please retry.', 'Close', { duration: 2600 });
+        },
+      });
   }
 }

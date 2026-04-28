@@ -425,7 +425,7 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
                       {{ formatBytes(job.total_bytes) }}
                     </td>
                     <td (click)="$event.stopPropagation()">
-                      <div class="progress" [class.pp]="isPostProc(job.status)">
+                      <div class="progress" [class.pp]="isPostProc(effectiveStatus(job))">
                         <div [style.width.%]="percent(job)"></div>
                       </div>
                     </td>
@@ -436,7 +436,7 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
                       {{ shouldShowLiveMetrics(job) ? eta(job) : '—' }}
                     </td>
                     <td class="col-status" (click)="$event.stopPropagation()">
-                      <span class="status-pill" [class]="statusClass(job.status)">{{ displayStatus(job.status) }}</span>
+                      <span class="status-pill" [class]="statusClass(effectiveStatus(job))">{{ displayStatus(effectiveStatus(job)) }}</span>
                     </td>
                     <td class="col-priority" (click)="$event.stopPropagation()">
                       <span
@@ -451,10 +451,12 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
                       </span>
                     </td>
                     <td class="actions col-actions" (click)="$event.stopPropagation()">
-                      @if (job.status === 'paused') {
+                      @if (effectiveStatus(job) === 'paused') {
                         <button type="button" class="row-action" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="resumeJob(job.id)">▶</button>
-                      } @else {
+                      } @else if (effectiveStatus(job) !== 'completed' && effectiveStatus(job) !== 'failed') {
                         <button type="button" class="row-action" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="pauseJob(job.id)">❚❚</button>
+                      } @else {
+                        <button type="button" class="row-action" [disabled]="true">—</button>
                       }
                       <button type="button" class="row-action danger" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="deleteJob(job.id)">✕</button>
                     </td>
@@ -1618,8 +1620,17 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     return status;
   }
 
+  effectiveStatus(job: NzbJob): string {
+    const remaining = this.remainingForJob(job);
+    if (remaining === 0 && (job.status === 'downloading' || job.status === 'queued')) {
+      return 'completed';
+    }
+    return job.status;
+  }
+
   shouldShowLiveMetrics(job: NzbJob): boolean {
-    return job.status === 'downloading' || this.isPostProc(job.status);
+    const status = this.effectiveStatus(job);
+    return status === 'downloading' || this.isPostProc(status);
   }
 
   private normalizeNonNegative(value: unknown): number {

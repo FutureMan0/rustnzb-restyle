@@ -157,6 +157,18 @@ fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority:
     }
 }
 
+fn normalize_queue_job_for_response(job: &mut NzbJob) {
+    if job.total_bytes > 0 && job.downloaded_bytes >= job.total_bytes {
+        if matches!(job.status, JobStatus::Downloading | JobStatus::Queued) {
+            job.status = JobStatus::Completed;
+            job.speed_bps = 0;
+        }
+        if job.downloaded_bytes > job.total_bytes {
+            job.downloaded_bytes = job.total_bytes;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -226,7 +238,9 @@ pub struct StatusResponse {
     pub speed_bps: u64,
     pub speed_limit_bps: u64,
     pub queue_size: usize,
-    pub disk_space_free: u64,
+    pub disk_free_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_space_free: Option<u64>,
     pub min_free_space_bytes: u64,
     pub pause_remaining_secs: Option<i64>,
     pub webdav_enabled: bool,
@@ -253,7 +267,10 @@ pub async fn h_queue_list(
     Query(q): Query<QueueQuery>,
 ) -> Result<Json<QueueResponse>, ApiError> {
     let qm = &state.queue_manager;
-    let all_jobs = qm.get_jobs();
+    let mut all_jobs = qm.get_jobs();
+    for job in &mut all_jobs {
+        normalize_queue_job_for_response(job);
+    }
     let total = all_jobs.len();
     let speed_bps = qm.get_speed();
     let paused = qm.is_paused();
@@ -721,13 +738,15 @@ pub async fn h_status(
 ) -> Result<Json<StatusResponse>, ApiError> {
     let qm = &state.queue_manager;
     let config = state.config();
+    let disk_free_bytes = get_disk_space_free(&config.general.complete_dir);
     Ok(Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION"),
         paused: qm.is_paused(),
         speed_bps: qm.get_speed(),
         speed_limit_bps: qm.get_speed_limit(),
         queue_size: qm.queue_size(),
-        disk_space_free: get_disk_space_free(&config.general.complete_dir),
+        disk_free_bytes,
+        disk_space_free: Some(disk_free_bytes),
         min_free_space_bytes: qm.min_free_space(),
         pause_remaining_secs: qm.pause_remaining_secs(),
         #[cfg(feature = "webdav")]
