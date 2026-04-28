@@ -8,7 +8,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
-import { forkJoin, Observable } from 'rxjs';
+import { finalize, forkJoin, Observable } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
 import { NzbJob, QueueResponse, StatusResponse } from '../../core/models/queue.model';
 import { QueueJobSheetComponent } from './queue-job-sheet.component';
@@ -430,10 +430,10 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
                       </div>
                     </td>
                     <td class="tabular-nums col-speed" (click)="$event.stopPropagation()">
-                      {{ job.speed_bps > 0 ? formatSpeed(job.speed_bps) : '—' }}
+                      {{ shouldShowLiveMetrics(job) ? formatSpeed(job.speed_bps) : '—' }}
                     </td>
                     <td class="tabular-nums col-eta" (click)="$event.stopPropagation()">
-                      {{ job.speed_bps > 0 ? eta(job) : '—' }}
+                      {{ shouldShowLiveMetrics(job) ? eta(job) : '—' }}
                     </td>
                     <td class="col-status" (click)="$event.stopPropagation()">
                       <span class="status-pill" [class]="statusClass(job.status)">{{ displayStatus(job.status) }}</span>
@@ -452,11 +452,11 @@ const DEMO_QUEUE_JOBS: NzbJob[] = [
                     </td>
                     <td class="actions col-actions" (click)="$event.stopPropagation()">
                       @if (job.status === 'paused') {
-                        <button type="button" class="row-action" [disabled]="isDemoJob(job)" (click)="resumeJob(job.id)">▶</button>
+                        <button type="button" class="row-action" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="resumeJob(job.id)">▶</button>
                       } @else {
-                        <button type="button" class="row-action" [disabled]="isDemoJob(job)" (click)="pauseJob(job.id)">❚❚</button>
+                        <button type="button" class="row-action" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="pauseJob(job.id)">❚❚</button>
                       }
-                      <button type="button" class="row-action danger" [disabled]="isDemoJob(job)" (click)="deleteJob(job.id)">✕</button>
+                      <button type="button" class="row-action danger" [disabled]="isDemoJob(job) || isActionPending(job.id)" (click)="deleteJob(job.id)">✕</button>
                     </td>
                   </tr>
                 }
@@ -1104,6 +1104,7 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   /** Last ~30 global speed samples for the sparkline (from /queue). */
   speedHistory = signal<number[]>([]);
   speedFlash = signal(false);
+  actionPendingIds = signal<Set<string>>(new Set());
   private lastQueueSpeedBps = 0;
 
   /** When showing the sample queue, id order after drag (preview only); `null` = default. */
@@ -1134,9 +1135,9 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   readonly inDummyMode = computed(() => this.jobs().length === 0 && this.showQueueDummy());
 
   readonly displayRemainingBytes = computed(() => {
-    if (this.jobs().length > 0) return this.remainingBytes();
+    if (this.jobs().length > 0) return this.normalizeNonNegative(this.remainingBytes());
     if (this.showQueueDummy()) {
-      return DEMO_QUEUE_JOBS.reduce((sum, j) => sum + (j.total_bytes - j.downloaded_bytes), 0);
+      return DEMO_QUEUE_JOBS.reduce((sum, j) => sum + this.remainingForJob(j), 0);
     }
     return 0;
   });
@@ -1145,14 +1146,14 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     if (this.jobs().length === 0 && this.showQueueDummy()) {
       return Math.round(12.4 * 1024 * 1024);
     }
-    return this.status()?.speed_bps ?? 0;
+    return this.normalizeNonNegative(this.status()?.speed_bps);
   });
 
   readonly displayDiskFreeBytes = computed(() => {
     if (this.jobs().length === 0 && this.showQueueDummy()) {
       return 450 * 1024 * 1024 * 1024;
     }
-    return this.status()?.disk_free_bytes ?? 0;
+    return this.normalizeNonNegative(this.status()?.disk_free_bytes);
   });
 
   readonly sparklinePath = computed(() => {
@@ -1226,6 +1227,10 @@ export class QueueViewComponent implements OnInit, OnDestroy {
 
   isDemoJob(job: NzbJob): boolean {
     return job.id.startsWith(DEMO_JOB_PREFIX);
+  }
+
+  isActionPending(id: string): boolean {
+    return this.actionPendingIds().has(id);
   }
 
   private readQueueDummyPref(): boolean {
@@ -1349,8 +1354,8 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     if (r.jobs.length > 0) {
       this.demoIdOrder.set(null);
     }
-    this.remainingBytes.set(r.jobs.reduce((sum, j) => sum + (j.total_bytes - j.downloaded_bytes), 0));
-    const sp = r.speed_bps;
+    this.remainingBytes.set(r.jobs.reduce((sum, j) => sum + this.remainingForJob(j), 0));
+    const sp = this.normalizeNonNegative(r.speed_bps);
     this.speedHistory.set([...this.speedHistory(), sp].slice(-30));
     if (sp !== this.lastQueueSpeedBps) {
       this.lastQueueSpeedBps = sp;
@@ -1432,9 +1437,11 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   gridRange(n: number): number[] { return Array.from({ length: n }, (_, i) => i); }
 
   etaTotal(): string {
-    const speed = this.status()?.speed_bps ?? 0;
-    if (speed === 0 || this.remainingBytes() === 0) return '—';
-    const secs = this.remainingBytes() / speed;
+    const speed = this.normalizeNonNegative(this.status()?.speed_bps);
+    const remaining = this.normalizeNonNegative(this.displayRemainingBytes());
+    if (speed <= 0 || remaining <= 0) return '—';
+    const secs = remaining / speed;
+    if (!Number.isFinite(secs) || secs <= 0) return '—';
     return 'ETA ' + this.formatDuration(secs);
   }
 
@@ -1484,18 +1491,43 @@ export class QueueViewComponent implements OnInit, OnDestroy {
 
   // ---- Per-job actions ----
 
+  private withPendingJobAction(id: string, action: Observable<unknown>, successMessage?: string): void {
+    if (this.isActionPending(id)) return;
+    const pending = new Set(this.actionPendingIds());
+    pending.add(id);
+    this.actionPendingIds.set(pending);
+    action.pipe(
+      finalize(() => {
+        const next = new Set(this.actionPendingIds());
+        next.delete(id);
+        this.actionPendingIds.set(next);
+      }),
+    ).subscribe({
+      next: () => {
+        if (successMessage) {
+          this.snackBar.open(successMessage, 'OK', { duration: 1500 });
+        }
+        this.loadQueue();
+      },
+      error: () => {
+        this.snackBar.open('Action failed. Please try again.', 'OK', { duration: 3000 });
+        this.loadQueue();
+      },
+    });
+  }
+
   pauseJob(id: string): void {
     if (id.startsWith(DEMO_JOB_PREFIX)) return;
-    this.api.post(`/queue/${id}/pause`).subscribe(() => this.loadQueue());
+    this.withPendingJobAction(id, this.api.post(`/queue/${id}/pause`), 'Job paused');
   }
   resumeJob(id: string): void {
     if (id.startsWith(DEMO_JOB_PREFIX)) return;
-    this.api.post(`/queue/${id}/resume`).subscribe(() => this.loadQueue());
+    this.withPendingJobAction(id, this.api.post(`/queue/${id}/resume`), 'Job resumed');
   }
 
   deleteJob(id: string): void {
     if (id.startsWith(DEMO_JOB_PREFIX)) return;
-    this.api.delete(`/queue/${id}`).subscribe(() => this.loadQueue());
+    this.withPendingJobAction(id, this.api.delete(`/queue/${id}`));
   }
 
   // ---- Bulk ----
@@ -1545,17 +1577,22 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   // ---- Formatting ----
 
   percent(job: { total_bytes: number; downloaded_bytes: number }): number {
-    if (job.total_bytes === 0) return 0;
-    return Math.round((job.downloaded_bytes / job.total_bytes) * 100);
+    const total = this.normalizeNonNegative(job.total_bytes);
+    if (total <= 0) return 0;
+    const downloaded = this.normalizeNonNegative(job.downloaded_bytes);
+    return Math.max(0, Math.min(100, Math.round((downloaded / total) * 100)));
   }
 
   eta(job: NzbJob): string {
-    if (job.speed_bps === 0) return '—';
-    const secs = (job.total_bytes - job.downloaded_bytes) / job.speed_bps;
+    const speed = this.normalizeNonNegative(job.speed_bps);
+    if (speed <= 0) return '—';
+    const secs = this.remainingForJob(job) / speed;
+    if (!Number.isFinite(secs) || secs <= 0) return '—';
     return this.formatDuration(secs);
   }
 
   formatDuration(secs: number): string {
+    if (!Number.isFinite(secs) || secs <= 0) return '0s';
     const h = Math.floor(secs / 3600);
     const m = Math.floor((secs % 3600) / 60);
     const s = Math.floor(secs % 60);
@@ -1581,33 +1618,53 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     return status;
   }
 
+  shouldShowLiveMetrics(job: NzbJob): boolean {
+    return job.status === 'downloading' || this.isPostProc(job.status);
+  }
+
+  private normalizeNonNegative(value: unknown): number {
+    const num = typeof value === 'number' ? value : Number(value ?? 0);
+    if (!Number.isFinite(num) || num < 0) return 0;
+    return num;
+  }
+
+  private remainingForJob(job: Pick<NzbJob, 'total_bytes' | 'downloaded_bytes'>): number {
+    const total = this.normalizeNonNegative(job.total_bytes);
+    const downloaded = this.normalizeNonNegative(job.downloaded_bytes);
+    return Math.max(0, total - downloaded);
+  }
+
   formatSpeed(bps: number): string {
     return `${this.formatSpeedValue(bps)} ${this.formatSpeedUnit(bps)}`;
   }
   private formatSpeedValue(bps: number): string {
-    if (bps === 0) return '0';
+    const safe = this.normalizeNonNegative(bps);
+    if (safe === 0) return '0';
     const k = 1024;
-    const i = Math.min(3, Math.floor(Math.log(bps) / Math.log(k)));
-    return (bps / Math.pow(k, i)).toFixed(1);
+    const i = Math.min(3, Math.floor(Math.log(safe) / Math.log(k)));
+    return (safe / Math.pow(k, i)).toFixed(1);
   }
   private formatSpeedUnit(bps: number): string {
     const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-    if (bps === 0) return 'B/s';
-    return units[Math.min(3, Math.floor(Math.log(bps) / Math.log(1024)))];
+    const safe = this.normalizeNonNegative(bps);
+    if (safe === 0) return 'B/s';
+    return units[Math.min(3, Math.floor(Math.log(safe) / Math.log(1024)))];
   }
 
   formatBytes(bytes: number): string {
     return `${this.formatBytesValue(bytes)} ${this.formatBytesUnit(bytes)}`;
   }
   private formatBytesValue(bytes: number): string {
-    if (bytes === 0) return '0';
+    const safe = this.normalizeNonNegative(bytes);
+    if (safe === 0) return '0';
     const k = 1024;
-    const i = Math.min(4, Math.floor(Math.log(bytes) / Math.log(k)));
-    return (bytes / Math.pow(k, i)).toFixed(1);
+    const i = Math.min(4, Math.floor(Math.log(safe) / Math.log(k)));
+    return (safe / Math.pow(k, i)).toFixed(1);
   }
   private formatBytesUnit(bytes: number): string {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    if (bytes === 0) return 'B';
-    return units[Math.min(4, Math.floor(Math.log(bytes) / Math.log(1024)))];
+    const safe = this.normalizeNonNegative(bytes);
+    if (safe === 0) return 'B';
+    return units[Math.min(4, Math.floor(Math.log(safe) / Math.log(1024)))];
   }
 }
