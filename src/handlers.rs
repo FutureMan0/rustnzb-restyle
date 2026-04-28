@@ -190,11 +190,10 @@ fn normalize_downloading_slots_for_response(jobs: &mut [NzbJob], max_active_down
     ranked.sort_by(|a, b| {
         let left = &jobs[*a];
         let right = &jobs[*b];
-        right
-            .speed_bps
-            .cmp(&left.speed_bps)
-            .then_with(|| priority_rank(right.priority).cmp(&priority_rank(left.priority)))
+        priority_rank(right.priority)
+            .cmp(&priority_rank(left.priority))
             .then_with(|| a.cmp(b))
+            .then_with(|| right.speed_bps.cmp(&left.speed_bps))
     });
 
     let keep: std::collections::HashSet<usize> =
@@ -641,10 +640,21 @@ pub async fn h_queue_move(
     Path(id): Path<String>,
     Json(body): Json<MoveJobBody>,
 ) -> Result<Json<SimpleResponse>, ApiError> {
-    state
-        .queue_manager
-        .move_job(&id, body.position)
-        .map_err(ApiError::from)?;
+    let qm = &state.queue_manager;
+    qm.move_job(&id, body.position).map_err(ApiError::from)?;
+
+    // If the user explicitly moves a job to the top, trigger an immediate preemption
+    // path so priority-first scheduling takes effect right away.
+    if body.position == 0 {
+        let maybe_priority = qm
+            .get_jobs()
+            .into_iter()
+            .find(|job| job.id == id)
+            .map(|job| job.priority);
+        if let Some(priority) = maybe_priority {
+            apply_priority_preemption(&state, &id, priority);
+        }
+    }
     Ok(Json(SimpleResponse { status: true }))
 }
 
