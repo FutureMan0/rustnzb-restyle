@@ -112,8 +112,8 @@ export function cleanAllBackendData(): void {
   // Also clean any leftover data dirs
   const mainDir = path.join(PROJECT_ROOT, 'e2e/test-data');
   const freshDir = path.join(PROJECT_ROOT, 'e2e/test-data-fresh');
-  if (fs.existsSync(mainDir)) fs.rmSync(mainDir, { recursive: true });
-  if (fs.existsSync(freshDir)) fs.rmSync(freshDir, { recursive: true });
+  rmDirWithRetries(mainDir);
+  rmDirWithRetries(freshDir);
 }
 
 async function waitForHealthy(url: string, timeoutMs: number): Promise<void> {
@@ -126,4 +126,24 @@ async function waitForHealthy(url: string, timeoutMs: number): Promise<void> {
     await new Promise(r => setTimeout(r, 200));
   }
   throw new Error(`Backend not healthy within ${timeoutMs}ms: ${url}`);
+}
+
+function rmDirWithRetries(dir: string): void {
+  if (!fs.existsSync(dir)) return;
+  const attempts = 8;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 });
+      return;
+    } catch (err) {
+      // Windows can temporarily lock sqlite/db files right after process exit.
+      // Give the OS a moment, then retry.
+      if (i === attempts - 1) throw err;
+      const waitMs = 120 * (i + 1);
+      const end = Date.now() + waitMs;
+      while (Date.now() < end) {
+        // busy-wait: teardown is synchronous by design
+      }
+    }
+  }
 }

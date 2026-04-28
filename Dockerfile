@@ -21,9 +21,13 @@ COPY tests tests
 ARG GIT_AUTH_TOKEN
 ARG PLUGIN_PASSWORD
 RUN TOKEN="${GIT_AUTH_TOKEN:-$PLUGIN_PASSWORD}" && \
-    git config --global url."http://x-access-token:${TOKEN}@100.92.54.45:3002/".insteadOf "http://100.92.54.45:3002/" && \
-    printf '[registries.forgejo]\nindex = "sparse+https://repo.indexarr.net/api/packages/indexarr/cargo/"\ncredential-provider = "cargo:token"\n\n[registry]\ndefault = "forgejo"\n' > $CARGO_HOME/config.toml && \
-    printf '[registries.forgejo]\ntoken = "Bearer %s"\n' "$TOKEN" > $CARGO_HOME/credentials.toml
+    if [ -n "$TOKEN" ]; then \
+      git config --global url."http://x-access-token:${TOKEN}@100.92.54.45:3002/".insteadOf "http://100.92.54.45:3002/" && \
+      printf '[registries.forgejo]\nindex = "sparse+https://repo.indexarr.net/api/packages/indexarr/cargo/"\ncredential-provider = "cargo:token"\n' > $CARGO_HOME/config.toml && \
+      printf '[registries.forgejo]\ntoken = "Bearer %s"\n' "$TOKEN" > $CARGO_HOME/credentials.toml; \
+    else \
+      echo "No Forgejo token provided; using crates.io defaults"; \
+    fi
 RUN sed -i '/^\[patch\./,/^$/d' Cargo.toml
 
 # RELEASE_OPTIMIZED=true enables fat LTO + single codegen-unit (slow but smaller binary)

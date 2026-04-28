@@ -21,9 +21,9 @@ interface LogEntry {
         <span class="hint">tracing subscriber · {{ follow() ? 'following' : 'paused' }} · {{ entries().length }} lines</span>
       </h3>
       <div class="body">
-        <div class="search-bar">
+        <div class="search-bar logs-toolbar">
           <input placeholder="Filter… (regex ok)" [(ngModel)]="filter" />
-          <select [(ngModel)]="levelFilter">
+          <select [(ngModel)]="levelFilter" title="Log level">
             <option value="">All levels</option>
             <option value="ERROR">ERROR</option>
             <option value="WARN">WARN</option>
@@ -60,6 +60,17 @@ interface LogEntry {
   styles: [`
     :host { display: block; }
 
+    @media (max-width: 767px) {
+      .logs-toolbar {
+        flex-direction: column;
+        align-items: stretch !important;
+        gap: 8px;
+      }
+      .logs-toolbar input,
+      .logs-toolbar select { width: 100% !important; max-width: none !important; }
+      .logs-toolbar .btn { width: 100%; justify-content: center; }
+    }
+
     .logs {
       font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
       padding: 10px 14px;
@@ -72,6 +83,26 @@ interface LogEntry {
       gap: 10px;
       padding: 2px 0;
       border-bottom: 1px dashed transparent;
+    }
+    @media (max-width: 767px) {
+      .logs .l {
+        display: block;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+      }
+      .logs .l .t,
+      .logs .l .lv,
+      .logs .l .tgt {
+        display: inline-block;
+        margin-right: 8px;
+        margin-bottom: 4px;
+        vertical-align: middle;
+      }
+      .logs .l .msg {
+        display: block;
+        margin-top: 6px;
+        font-size: 11px;
+      }
     }
     .logs .l:hover { background: rgba(255,255,255,.02); }
     .logs .t { color: var(--mute); }

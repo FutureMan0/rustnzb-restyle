@@ -2,7 +2,20 @@ import { Component, OnInit, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { Router } from '@angular/router';
+import { HttpErrorResponse } from '@angular/common/http';
 import { AuthService } from '../../core/services/auth.service';
+
+/** Best-effort message from JSON or text error bodies (Axum often uses `message` or `error`). */
+function apiErrorText(err: unknown): string | null {
+  if (err == null) return null;
+  if (typeof err === 'string') return err.trim() || null;
+  if (typeof err === 'object') {
+    const o = err as Record<string, unknown>;
+    if (typeof o['message'] === 'string') return o['message'];
+    if (typeof o['error'] === 'string') return o['error'];
+  }
+  return null;
+}
 
 @Component({
   selector: 'app-login',
@@ -84,52 +97,55 @@ import { AuthService } from '../../core/services/auth.service';
   styles: [`
     .login-wrapper {
       display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; background: #0d1117; padding: 16px;
+      min-height: 100vh; background: var(--bg); padding: 16px;
     }
 
     .login-card {
-      width: 100%; max-width: 400px; background: #161b22;
-      border: 1px solid #30363d; border-radius: 8px; padding: 32px;
+      width: 100%; max-width: 400px; background: var(--card);
+      border: 1px solid var(--line); border-radius: 14px; padding: 32px;
     }
 
     .login-header { text-align: center; margin-bottom: 24px; }
 
-    .login-logo { width: 220px; height: auto; }
+    .login-logo { width: min(220px, 60vw); height: auto; }
 
     .login-subtitle {
-      color: #8b949e; font-size: 14px; margin: 8px 0 0;
+      color: var(--text-secondary); font-size: 14px; margin: 8px 0 0;
     }
 
     .login-loading {
-      text-align: center; color: #8b949e; padding: 24px 0;
+      text-align: center; color: var(--text-secondary); padding: 24px 0;
     }
 
     .login-form { display: flex; flex-direction: column; gap: 16px; }
 
     .login-error {
-      background: rgba(248, 81, 73, 0.1); border: 1px solid #f85149;
-      border-radius: 6px; padding: 10px 14px; color: #f85149;
+      background: color-mix(in srgb, var(--danger) 12%, transparent);
+      border: 1px solid var(--danger);
+      border-radius: 8px; padding: 10px 14px; color: var(--danger);
       font-size: 13px;
     }
 
     .form-group { display: flex; flex-direction: column; gap: 6px; }
 
-    .form-label { color: #c9d1d9; font-size: 13px; font-weight: 600; }
+    .form-label { color: var(--text); font-size: 13px; font-weight: 600; }
 
     .form-input {
-      background: #0d1117; border: 1px solid #30363d; border-radius: 6px;
-      padding: 8px 12px; color: #c9d1d9; font-size: 14px;
+      background: var(--bg-elevated, var(--bg));
+      border: 1px solid var(--line); border-radius: 8px;
+      padding: 10px 12px; color: var(--text); font-size: 14px;
       outline: none; transition: border-color 0.15s ease;
     }
-    .form-input:focus { border-color: #58a6ff; }
-    .form-input::placeholder { color: #484f58; }
+    .form-input:focus { border-color: var(--tint); }
+    .form-input::placeholder { color: var(--text-secondary); }
 
     .submit-btn {
-      background: #238636; border: 1px solid #2ea043; border-radius: 6px;
-      padding: 10px 16px; color: #ffffff; font-size: 14px; font-weight: 600;
-      cursor: pointer; transition: background 0.15s ease; margin-top: 4px;
+      background: var(--tint); border: 1px solid var(--tint); border-radius: 10px;
+      padding: 14px 16px; color: #fff; font-size: 15px; font-weight: 600;
+      cursor: pointer; transition: filter 0.15s ease; margin-top: 4px;
+      min-height: 48px;
     }
-    .submit-btn:hover:not(:disabled) { background: #2ea043; }
+    .submit-btn:hover:not(:disabled) { filter: brightness(1.08); }
     .submit-btn:disabled { opacity: 0.6; cursor: not-allowed; }
   `],
 })
@@ -196,16 +212,27 @@ export class LoginComponent implements OnInit {
       next: () => {
         this.router.navigate(isSetup ? ['/welcome'] : ['/queue']);
       },
-      error: (err) => {
+      error: (err: HttpErrorResponse) => {
         this.submitting.set(false);
+        const detail = apiErrorText(err.error);
         if (err.status === 401) {
           this.errorMessage.set('Invalid username or password.');
         } else if (err.status === 409) {
           this.errorMessage.set('An account already exists. Please sign in instead.');
-        } else if (err.error?.message) {
-          this.errorMessage.set(err.error.message);
+        } else if (detail) {
+          this.errorMessage.set(detail);
+        } else if (err.status === 0) {
+          this.errorMessage.set(
+            'Cannot reach the API. If you use the Angular dev server, start rustnzb on port 9090 (see frontend/proxy.conf.json), or point the proxy at your running instance.',
+          );
+        } else if (err.status === 500) {
+          this.errorMessage.set(
+            'Server error (500) during login. Check the rustnzb log output — often a database or auth config issue. If no account exists yet, complete the first-run setup instead of using test credentials.',
+          );
         } else {
-          this.errorMessage.set('An error occurred. Please try again.');
+          this.errorMessage.set(
+            `Request failed (${err.status || 'unknown'}). Check that the backend is running and try again.`,
+          );
         }
       },
     });

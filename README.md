@@ -5,7 +5,7 @@
 Built from scratch with zero legacy dependencies. Fast, efficient, and designed for self-hosters. Full NNTP pipeline with yEnc decoding, PAR2 verification & repair, archive extraction, and a clean web UI. No inherited technical debt -- just modern Rust with async I/O, connection pooling, and NNTP pipelining for maximum throughput.
 
 [![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)](https://www.rust-lang.org/)
-[![Docker](https://img.shields.io/badge/Docker-Hub-blue)](https://hub.docker.com/r/ausagentsmith/rustnzb)
+[![Docker](https://img.shields.io/badge/Docker-GHCR-blue)](https://github.com/features/packages)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ---
@@ -67,7 +67,7 @@ docker run -d \
   -v ./config:/config \
   -v ./data:/data \
   -v /path/to/downloads:/downloads \
-  ausagentsmith/rustnzb:latest
+  ghcr.io/<DEIN_GHCR_OWNER>/rustnzb-restyle:latest
 ```
 
 Open `http://localhost:9090` and add your NNTP servers via the web UI.
@@ -75,11 +75,15 @@ Open `http://localhost:9090` and add your NNTP servers via the web UI.
 ### Docker Compose
 
 ```bash
-git clone https://github.com/AusAgentSmith-org/rustnzb.git
-cd rustnzb
+git clone https://github.com/FutureMan0/rustnzb-restyle.git
+cd rustnzb-restyle
 cp config.example.toml config.toml
 docker compose up -d
 ```
+
+### Unraid (Community Applications)
+
+Siehe [`docs/unraid.md`](docs/unraid.md) für die empfohlenen Volumes/Env-Variablen und Update-Workflow.
 
 ### Desktop App
 
@@ -92,8 +96,8 @@ Download the latest installer from [GitHub Releases](https://github.com/AusAgent
 ### From Source
 
 ```bash
-git clone https://github.com/AusAgentSmith-org/rustnzb.git
-cd rustnzb
+git clone https://github.com/FutureMan0/rustnzb-restyle.git
+cd rustnzb-restyle
 cp config.example.toml config.toml
 cargo build --release
 ./target/release/rustnzb

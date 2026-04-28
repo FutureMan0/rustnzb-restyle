@@ -24,6 +24,17 @@ export default defineConfig({
         screenshot: 'only-on-failure',
       },
     },
+    {
+      name: 'mobile',
+      testMatch: ['**/smoke.spec.ts'],
+      use: {
+        ...devices['Pixel 5'],
+        baseURL: 'http://localhost:9190',
+        storageState: 'auth-state.json',
+        trace: 'on-first-retry',
+        screenshot: 'only-on-failure',
+      },
+    },
     // ── Fresh/first-boot: runs first; expects no credentials on startup ──────
     // Split into two projects so auth.spec.ts waits for first-boot.spec.ts to
     // finish (and create credentials) before running. Playwright does not

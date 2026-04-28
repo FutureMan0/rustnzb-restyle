@@ -1,4 +1,4 @@
-import { Component, OnInit, signal, computed } from '@angular/core';
+import { Component, OnDestroy, OnInit, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
@@ -54,10 +54,15 @@ interface RuleFormModel {
     </div>
 
     <!-- ============ Feeds panel ============ -->
-    <div class="panel">
-      <h3>Feeds
-        <span class="hint">each feed polls an RSS URL, optionally filters by regex, and auto-enqueues matches</span>
-      </h3>
+    <details
+      class="panel rss-accordion"
+      [open]="isWide() || rssOpenFeeds()"
+      (toggle)="onRssToggle($event, 'feeds')">
+      <summary class="rss-summary">
+        <h3>Feeds
+          <span class="hint">each feed polls an RSS URL, optionally filters by regex, and auto-enqueues matches</span>
+        </h3>
+      </summary>
 
       @if (feedFormVisible()) {
         <div class="body edit-form">
@@ -124,13 +129,18 @@ interface RuleFormModel {
       <div class="body" style="border-top:1px solid var(--line)">
         <button class="btn primary" (click)="showAddFeed()" [disabled]="feedFormVisible()">+ Add feed</button>
       </div>
-    </div>
+    </details>
 
     <!-- ============ Rules panel ============ -->
-    <div class="panel">
-      <h3>Download rules
-        <span class="hint">regex rules applied across feeds; sets category + priority on match</span>
-      </h3>
+    <details
+      class="panel rss-accordion"
+      [open]="isWide() || rssOpenRules()"
+      (toggle)="onRssToggle($event, 'rules')">
+      <summary class="rss-summary">
+        <h3>Download rules
+          <span class="hint">regex rules applied across feeds; sets category + priority on match</span>
+        </h3>
+      </summary>
 
       @if (ruleFormVisible()) {
         <div class="body edit-form">
@@ -161,7 +171,7 @@ interface RuleFormModel {
       }
 
       <div class="body flush">
-        <table class="data">
+        <table class="data data-mobile-cards">
           <thead>
             <tr>
               <th>Name</th>
@@ -205,15 +215,20 @@ interface RuleFormModel {
       <div class="body" style="border-top:1px solid var(--line)">
         <button class="btn primary" (click)="showAddRule()" [disabled]="ruleFormVisible()">+ Add rule</button>
       </div>
-    </div>
+    </details>
 
     <!-- ============ Recent items ============ -->
-    <div class="panel">
-      <h3>Recent items
-        <span class="hint">last {{ items().length }} · grouped by feed</span>
-      </h3>
+    <details
+      class="panel rss-accordion"
+      [open]="isWide() || rssOpenItems()"
+      (toggle)="onRssToggle($event, 'items')">
+      <summary class="rss-summary">
+        <h3>Recent items
+          <span class="hint">last {{ items().length }} · grouped by feed</span>
+        </h3>
+      </summary>
       <div class="body flush">
-        <table class="data">
+        <table class="data data-mobile-cards">
           <thead>
             <tr>
               <th>Feed</th>
@@ -249,7 +264,7 @@ interface RuleFormModel {
           </tbody>
         </table>
       </div>
-    </div>
+    </details>
   `,
   styles: [`
     :host { display: block; }
@@ -274,9 +289,16 @@ interface RuleFormModel {
     .dim { color: var(--mute); }
     .empty { padding: 20px; color: var(--mute); font-size: 13px; text-align: center; }
     .empty-cell { text-align: center; padding: 28px !important; color: var(--mute); font-size: 13px; }
+
+    .rss-summary { list-style: none; cursor: pointer; padding: 0; margin: 0; }
+    .rss-summary::-webkit-details-marker { display: none; }
+    .rss-summary h3 { margin: 0; padding: 14px 16px; }
+    @media (min-width: 1024px) {
+      .rss-summary { cursor: default; }
+    }
   `],
 })
-export class RssViewComponent implements OnInit {
+export class RssViewComponent implements OnInit, OnDestroy {
   feeds = signal<RssFeed[]>([]);
   rules = signal<RssRule[]>([]);
   items = signal<RssItem[]>([]);
@@ -288,6 +310,16 @@ export class RssViewComponent implements OnInit {
   ruleFormVisible = signal(false);
   editingRuleId = signal<string | null>(null);
   ruleForm: RuleFormModel = this.emptyRuleForm();
+
+  /** At least 1024px: all sections expanded; smaller: collapsible sections. */
+  isWide = signal(
+    typeof window !== 'undefined' && window.matchMedia('(min-width: 1024px)').matches,
+  );
+  rssOpenFeeds = signal(true);
+  rssOpenRules = signal(false);
+  rssOpenItems = signal(false);
+  private rssMedia?: MediaQueryList;
+  private onRssMediaChange = () => this.syncRssAccordion();
 
   // ---- Stat-card derivations ----
   enabledFeedCount = computed(() => this.feeds().filter(f => f.enabled).length);
@@ -305,7 +337,42 @@ export class RssViewComponent implements OnInit {
 
   constructor(private api: ApiService, private snack: MatSnackBar) {}
 
-  ngOnInit(): void { this.loadAll(); }
+  ngOnInit(): void {
+    this.rssMedia = window.matchMedia('(min-width: 1024px)');
+    this.rssMedia.addEventListener('change', this.onRssMediaChange);
+    this.syncRssAccordion();
+    this.loadAll();
+  }
+
+  ngOnDestroy(): void {
+    this.rssMedia?.removeEventListener('change', this.onRssMediaChange);
+  }
+
+  private syncRssAccordion(): void {
+    const w = this.rssMedia?.matches ?? window.matchMedia('(min-width: 1024px)').matches;
+    this.isWide.set(w);
+    if (w) {
+      this.rssOpenFeeds.set(true);
+      this.rssOpenRules.set(true);
+      this.rssOpenItems.set(true);
+    } else {
+      this.rssOpenFeeds.set(true);
+      this.rssOpenRules.set(false);
+      this.rssOpenItems.set(false);
+    }
+  }
+
+  onRssToggle(e: Event, which: 'feeds' | 'rules' | 'items'): void {
+    const el = e.target;
+    if (!(el instanceof HTMLDetailsElement)) return;
+    if (this.isWide()) {
+      el.open = true;
+      return;
+    }
+    if (which === 'feeds') this.rssOpenFeeds.set(el.open);
+    else if (which === 'rules') this.rssOpenRules.set(el.open);
+    else this.rssOpenItems.set(el.open);
+  }
 
   loadAll(): void {
     this.api.get<RssFeed[]>('/config/rss-feeds').subscribe({

@@ -7,6 +7,7 @@ data_dir = "e2e/test-data"
 speed_limit_bps = 0
 cache_size = 524288000
 log_level = "warn"
+history_retention = 0
 max_active_downloads = 1
 min_free_space_bytes = 1073741824
 rss_history_limit = 500
@@ -20,7 +21,7 @@ article_timeout_secs = 30
 id = "test-server-1"
 name = "Test Server"
 host = "news.example.com"
-port = 563
+port = 4
 ssl = true
 ssl_verify = false
 connections = 4
@@ -41,6 +42,10 @@ post_processing = 3
 name = "tv"
 post_processing = 3
 
+[[categories]]
+name = "e2e-cat"
+post_processing = 3
+
 [otel]
 enabled = false
 endpoint = "http://localhost:4317"
@@ -52,3 +57,7 @@ url = "https://example.com/rss"
 poll_interval_secs = 900
 enabled = true
 auto_download = false
+
+[dav]
+auto_send_all = false
+category_rules = []

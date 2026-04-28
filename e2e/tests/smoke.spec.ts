@@ -18,12 +18,16 @@ test.describe('Smoke Tests', () => {
     await page.goto('/');
     await expect(page).toHaveURL(/\/queue/);
     await expect(page.locator('.brand')).toBeVisible();
-    // All tabs visible
+    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
     await expect(page.getByRole('link', { name: 'Queue' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Search' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'History' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Search' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Settings' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'Logs' })).toBeVisible();
+    if (wide) {
+      await expect(page.getByRole('link', { name: 'Logs' })).toBeVisible();
+    } else {
+      await expect(page.locator('.app-bottom-nav')).toBeVisible();
+    }
   });
 
   test('queue tab shows seeded jobs', async ({ page }) => {
@@ -97,7 +101,7 @@ test.describe('Smoke Tests', () => {
   test('tabs navigate correctly', async ({ page }) => {
     await page.goto('/queue');
     await page.getByRole('link', { name: 'Search' }).click();
-    await expect(page).toHaveURL(/\/search/);
+    await expect(page).toHaveURL(/\/groups/);
     await page.getByRole('link', { name: 'Settings' }).click();
     await expect(page).toHaveURL(/\/settings/);
     await page.getByRole('link', { name: 'Queue' }).click();
@@ -106,9 +110,24 @@ test.describe('Smoke Tests', () => {
 
   test('status bar shows info', async ({ page }) => {
     await page.goto('/');
-    // Status pills: "Daemon running" or "Paused", speed, queue count, disk space
-    await expect(page.locator('.pill').first()).toBeVisible();
-    await expect(page.locator('.pill', { hasText: /Daemon running|Paused/ })).toBeVisible();
+    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
+    if (wide) {
+      await expect(page.locator('.app-topbar--live')).toBeVisible();
+      await expect(page.locator('.app-topbar--live .live-dot')).toBeVisible();
+    } else {
+      await expect(page.locator('.app-topbar .brand')).toBeVisible();
+    }
+  });
+
+  test('settings display offers OLED', async ({ page }) => {
+    await page.goto('/settings');
+    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
+    if (!wide) {
+      await page.locator('#settingsTab').selectOption('display');
+    } else {
+      await page.getByRole('button', { name: 'Display' }).click();
+    }
+    await expect(page.getByText('OLED (Pure Black)')).toBeVisible();
   });
 
   test('groups API returns seeded data', async ({ request }) => {

@@ -1,16 +1,21 @@
-import { Component, OnInit, signal, computed } from '@angular/core';
+import { Component, OnInit, OnDestroy, inject, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatBottomSheet, MatBottomSheetModule } from '@angular/material/bottom-sheet';
 import { GroupService } from '../../core/services/group.service';
 import { GroupRow, HeaderRow } from '../../core/models/group.model';
 import { GroupBrowserDialogComponent } from './group-browser-dialog.component';
+import {
+  ArticlePreviewSheetComponent,
+  type ArticlePreviewSheetData,
+} from './article-preview-sheet.component';
 
 @Component({
   selector: 'app-groups-view',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatSnackBarModule, MatDialogModule],
+  imports: [CommonModule, FormsModule, MatSnackBarModule, MatDialogModule, MatBottomSheetModule],
   template: `
     <!-- Top search panel -->
     <div class="panel">
@@ -80,7 +85,7 @@ import { GroupBrowserDialogComponent } from './group-browser-dialog.component';
               <button class="btn sm" (click)="markAllRead()">✓ Mark read</button>
             </h3>
             <div class="body flush">
-              <table class="data">
+              <table class="data data-mobile-cards">
                 <thead>
                   <tr>
                     <th style="width:32px">
@@ -156,6 +161,17 @@ import { GroupBrowserDialogComponent } from './group-browser-dialog.component';
   styles: [`
     :host { display: block; }
     .shell { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
+    @media (max-width: 1023px) {
+      .shell { grid-template-columns: 1fr; }
+      .side {
+        position: relative;
+        top: 0;
+        max-height: 240px;
+        display: flex;
+        flex-direction: column;
+      }
+      .side-list { max-height: 160px; }
+    }
     .side {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -229,9 +245,25 @@ import { GroupBrowserDialogComponent } from './group-browser-dialog.component';
       word-break: break-all;
     }
     .loading { color: var(--mute); font-size: 13px; padding: 20px; text-align: center; }
+
+    @media (max-width: 1023px) {
+      .data-mobile-cards td.actions { text-align: right; padding-top: 8px; }
+    }
+    @media (max-width: 1023px) {
+      .desktop-article-preview { display: none !important; }
+    }
   `],
 })
-export class GroupsViewComponent implements OnInit {
+export class GroupsViewComponent implements OnInit, OnDestroy {
+  private readonly bottomSheet = inject(MatBottomSheet);
+  private mediaQueryList?: MediaQueryList;
+  private onMediaChange?: () => void;
+
+  /** Match plan breakpoint for list/sheet layout (align with .tbl-desktop-only). */
+  isNarrow = signal(
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 1023px)').matches,
+  );
+
   groups = signal<GroupRow[]>([]);
   selectedGroup = signal<GroupRow | null>(null);
   groupFilter = '';
@@ -268,7 +300,18 @@ export class GroupsViewComponent implements OnInit {
     private dialog: MatDialog,
   ) {}
 
-  ngOnInit(): void { this.loadGroups(); }
+  ngOnInit(): void {
+    this.mediaQueryList = window.matchMedia('(max-width: 1023px)');
+    this.onMediaChange = () => this.isNarrow.set(this.mediaQueryList!.matches);
+    this.mediaQueryList.addEventListener('change', this.onMediaChange);
+    this.loadGroups();
+  }
+
+  ngOnDestroy(): void {
+    if (this.mediaQueryList && this.onMediaChange) {
+      this.mediaQueryList.removeEventListener('change', this.onMediaChange);
+    }
+  }
 
   loadGroups(): void {
     this.svc.list({ subscribed: true, limit: 500 }).subscribe(r => this.groups.set(r.groups));
@@ -362,6 +405,26 @@ export class GroupsViewComponent implements OnInit {
   }
 
   selectArticle(h: HeaderRow): void {
+    if (this.isNarrow()) {
+      const data: ArticlePreviewSheetData = {
+        messageId: h.message_id,
+        header: h,
+        onLoaded: () => {
+          if (!h.read) {
+            h.read = true;
+            this.headers.set([...this.headers()]);
+          }
+        },
+      };
+      this.bottomSheet.open(ArticlePreviewSheetComponent, {
+        data,
+        panelClass: 'ruddarr-bottom-sheet',
+      });
+      this.previewHeader.set(null);
+      this.articleBody.set(null);
+      this.articleLoading.set(false);
+      return;
+    }
     this.previewHeader.set(h);
     this.articleLoading.set(true);
     this.articleBody.set(null);
@@ -391,7 +454,14 @@ export class GroupsViewComponent implements OnInit {
   }
 
   openBrowseDialog(): void {
-    this.dialog.open(GroupBrowserDialogComponent, { width: '700px', maxHeight: '80vh' })
+    this.dialog
+      .open(GroupBrowserDialogComponent, {
+        width: '700px',
+        maxWidth: '100vw',
+        maxHeight: '90vh',
+        panelClass: 'ruddarr-dialog-mobile',
+        autoFocus: 'first-tabbable',
+      })
       .afterClosed()
       .subscribe(() => this.loadGroups());
   }

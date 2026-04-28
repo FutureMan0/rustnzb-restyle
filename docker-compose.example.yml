@@ -1,6 +1,6 @@
 services:
   rustnzb:
-    image: ghcr.io/ausagentsmith-org/rustnzb:latest
+    image: ghcr.io/${RUSTNZB_GHCR_OWNER:-REPLACE_ME}/${RUSTNZB_IMAGE_NAME:-rustnzb-restyle}:latest
     container_name: rustnzb
     restart: unless-stopped
     ports:

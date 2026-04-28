@@ -46,18 +46,24 @@ import { GroupRow } from '../../core/models/group.model';
   `,
   styles: [`
     .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
-    .search-input { flex: 1; padding: 6px 10px; background: #161b22; border: 1px solid #30363d; border-radius: 4px; color: #c9d1d9; font-size: 13px; outline: none; }
-    .search-input:focus { border-color: #58a6ff; }
-    .tool-btn { padding: 5px 12px; border-radius: 4px; border: 1px solid #30363d; background: #21262d; color: #c9d1d9; cursor: pointer; font-size: 12px; white-space: nowrap; }
-    .tool-btn:hover { background: #30363d; }
+    .search-input { flex: 1; padding: 6px 10px; background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; color: var(--text); font-size: 13px; outline: none; }
+    .search-input:focus { border-color: var(--tint); }
+    .tool-btn { padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel2); color: var(--text); cursor: pointer; font-size: 12px; white-space: nowrap; }
+    .tool-btn:hover { background: var(--card); }
     .tool-btn:disabled { opacity: 0.4; }
-    .group-list { max-height: 400px; overflow-y: auto; }
-    .group-row { display: flex; align-items: center; padding: 6px 4px; border-bottom: 1px solid #21262d; font-size: 13px; }
+    .group-list { max-height: min(400px, 60vh); overflow-y: auto; }
+    .group-row { display: flex; align-items: center; padding: 6px 4px; border-bottom: 1px solid var(--line); font-size: 13px; }
     .gname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .gcount { width: 80px; text-align: right; color: #8b949e; font-size: 12px; padding: 0 8px; }
-    .sub-btn { background: none; border: none; font-size: 18px; cursor: pointer; color: #8b949e; padding: 0 4px; }
-    .sub-btn.subscribed { color: #f0c040; }
-    .empty { padding: 24px; text-align: center; color: #484f58; }
+    .gcount { width: 80px; text-align: right; color: var(--text-secondary); font-size: 12px; padding: 0 8px; }
+    .sub-btn {
+      min-width: 44px; min-height: 44px;
+      display: inline-flex; align-items: center; justify-content: center;
+      background: none; border: none; font-size: 20px; line-height: 1;
+      cursor: pointer; color: var(--text-secondary); padding: 0; border-radius: 8px;
+    }
+    .sub-btn:hover { background: var(--panel2); }
+    .sub-btn.subscribed { color: var(--warn, #e5a00d); }
+    .empty { padding: 24px; text-align: center; color: var(--text-secondary); }
     .more { text-align: center; padding: 8px; }
   `],
 })

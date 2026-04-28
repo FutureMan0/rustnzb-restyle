@@ -2,6 +2,9 @@ import { Component, OnInit, OnDestroy, signal, computed } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatMenuModule } from '@angular/material/menu';
+import { MatButtonModule } from '@angular/material/button';
+import { MatIconModule } from '@angular/material/icon';
 import { ApiService } from '../../core/services/api.service';
 import { HistoryEntry, StatusResponse } from '../../core/models/queue.model';
 
@@ -11,7 +14,7 @@ type TimeFilter = '7d' | '30d' | 'all';
 @Component({
   selector: 'app-history-view',
   standalone: true,
-  imports: [CommonModule, FormsModule, MatSnackBarModule],
+  imports: [CommonModule, FormsModule, MatSnackBarModule, MatMenuModule, MatButtonModule, MatIconModule],
   template: `
     <!-- Stat cards -->
     <div class="cards4">
@@ -38,45 +41,123 @@ type TimeFilter = '7d' | '30d' | 'all';
       </div>
     </div>
 
-    <!-- History panel -->
-    <div class="panel">
-      <h3>History
-        <span class="hint">{{ filteredEntries().length }} of {{ entries().length }} shown</span>
-      </h3>
-      <div class="body">
-        <div class="search-bar">
-          <input placeholder="Filter name…" [(ngModel)]="nameFilter" />
-          <select [(ngModel)]="filterStatus">
-            <option value="all">All statuses</option>
-            <option value="completed">Completed</option>
-            <option value="failed">Failed</option>
-          </select>
-          <select [(ngModel)]="filterCategory">
-            <option value="">All categories</option>
-            @for (cat of categoryOptions(); track cat) { <option [value]="cat">{{ cat }}</option> }
-          </select>
-          <select [(ngModel)]="filterTime">
-            <option value="7d">Last 7 days</option>
-            <option value="30d">Last 30 days</option>
-            <option value="all">All time</option>
-          </select>
-          <button class="btn ghost" (click)="exportCsv()">Export CSV</button>
-          @if (entries().length > 0) {
-            <button class="btn danger" (click)="clearAll()">Clear all</button>
+    <div class="hist-toolbar">
+      <div class="search-bar hist-search">
+        <input placeholder="Filter name…" [(ngModel)]="nameFilter" />
+      </div>
+      <div class="hist-actions">
+        <div class="filter-btn-wrap">
+          <button type="button" mat-icon-button [matMenuTriggerFor]="filterMenu" aria-label="Filters">
+            <mat-icon [class.filter-on]="hasActiveFilters()">tune</mat-icon>
+          </button>
+          @if (hasActiveFilters()) {
+            <span class="filter-badge-dot" aria-hidden="true"></span>
           }
         </div>
+        <mat-menu #filterMenu="matMenu" class="hist-filter-menu">
+          <div class="filter-menu-body" (click)="$event.stopPropagation()">
+            <label>Status</label>
+            <select [(ngModel)]="filterStatus">
+              <option value="all">All</option>
+              <option value="completed">Completed</option>
+              <option value="failed">Failed</option>
+            </select>
+            <label>Category</label>
+            <select [(ngModel)]="filterCategory">
+              <option value="">All</option>
+              @for (cat of categoryOptions(); track cat) {
+                <option [value]="cat">{{ cat }}</option>
+              }
+            </select>
+            <label>Time</label>
+            <select [(ngModel)]="filterTime">
+              <option value="7d">7 days</option>
+              <option value="30d">30 days</option>
+              <option value="all">All time</option>
+            </select>
+          </div>
+        </mat-menu>
+        <button type="button" class="btn sm" (click)="exportCsv()">Export</button>
+        @if (entries().length > 0) {
+          <button type="button" class="btn sm danger" (click)="clearAll()">Clear</button>
+        }
       </div>
+    </div>
+
+    <p class="hist-count">{{ filteredEntries().length }} of {{ entries().length }} shown</p>
+
+    <div class="inset-section list-mobile-only">
+      <div class="inset-section__body">
+        @if (filteredEntries().length === 0) {
+          <div class="empty-state">
+            <div class="empty-state__icon" aria-hidden="true">📜</div>
+            @if (entries().length === 0) {
+              <h3>No events</h3>
+              <p>Completed jobs will appear here.</p>
+            } @else {
+              <h3>No match</h3>
+              <p>Adjust filters.</p>
+            }
+          </div>
+        } @else {
+          @for (e of filteredEntries(); track e.id) {
+            <div
+              class="group-box hist-item"
+              [class.hist-item--ok]="e.status === 'completed'"
+              [class.hist-item--fail]="e.status === 'failed'"
+            >
+              <span class="group-box__caption">{{ e.status | uppercase }}</span>
+              <div class="group-box__title" [class.dim]="e.status === 'failed'">{{ e.name }}</div>
+              @if (e.error_message) {
+                <div class="e-err">{{ e.error_message }}</div>
+              }
+              @if (e.stages && e.stages.length > 0) {
+                <div class="stage-chips" aria-label="Post-processing stages">
+                  @for (s of e.stages; track s.name) {
+                    <span class="stage-chip" [class.stage-chip--bad]="s.status !== 'ok'">{{ s.name }}</span>
+                  }
+                </div>
+              }
+              <div class="bullet-row">
+                @if (e.category) {
+                  <span class="tag cat">{{ e.category }}</span>
+                  <span class="sep">•</span>
+                }
+                <span class="tabular-nums">{{ formatBytes(e.total_bytes) }}</span>
+                <span class="sep">•</span>
+                <span class="tabular-nums">{{ formatDuration(e.added_at, e.completed_at) }}</span>
+                <span class="sep">•</span>
+                <span>{{ relativeTime(e.completed_at) }}</span>
+              </div>
+              <div class="hist-row-actions">
+                @if (e.status === 'failed') {
+                  <button type="button" class="btn sm" (click)="retry(e.id)">Retry</button>
+                }
+                @if (e.status === 'completed' && webdavEnabled()) {
+                  <button type="button" class="btn sm" (click)="addToMedia(e.id)">Media</button>
+                }
+                <button type="button" class="btn sm ghost" (click)="openOutput(e)">Path</button>
+                <button type="button" class="btn sm danger" (click)="remove(e.id)">Remove</button>
+              </div>
+            </div>
+          }
+        }
+      </div>
+    </div>
+
+    <div class="panel tbl-desktop-only">
+      <h3>Table</h3>
       <div class="body flush">
         <table class="data">
           <thead>
             <tr>
-              <th style="width:36%">Name</th>
+              <th>Name</th>
               <th>Category</th>
               <th>Size</th>
               <th>Duration</th>
-              <th>Completed</th>
+              <th>Done</th>
               <th>Status</th>
-              <th style="width:140px"></th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -84,41 +165,36 @@ type TimeFilter = '7d' | '30d' | 'all';
               <tr>
                 <td>
                   <div class="e-name" [class.dim]="e.status === 'failed'">{{ e.name }}</div>
-                  @if (e.error_message) { <div class="e-err">{{ e.error_message }}</div> }
+                  @if (e.error_message) {
+                    <div class="e-err">{{ e.error_message }}</div>
+                  }
                 </td>
                 <td>
-                  @if (e.category) { <span class="tag cat">{{ e.category }}</span> }
+                  @if (e.category) {
+                    <span class="tag cat">{{ e.category }}</span>
+                  }
                 </td>
-                <td>{{ formatBytes(e.total_bytes) }}</td>
-                <td>{{ formatDuration(e.added_at, e.completed_at) }}</td>
+                <td class="tabular-nums">{{ formatBytes(e.total_bytes) }}</td>
+                <td class="tabular-nums">{{ formatDuration(e.added_at, e.completed_at) }}</td>
                 <td>{{ relativeTime(e.completed_at) }}</td>
                 <td>
-                  <span class="status-pill" [class]="e.status === 'completed' ? 's-ok' : 's-fail'">
-                    {{ e.status }}
-                  </span>
+                  <span class="status-pill" [class]="e.status === 'completed' ? 's-ok' : 's-fail'">{{ e.status }}</span>
                 </td>
                 <td>
                   @if (e.status === 'failed') {
-                    <button class="row-action warn" (click)="retry(e.id)">↻ retry</button>
+                    <button type="button" class="row-action warn" (click)="retry(e.id)">↻</button>
                   }
                   @if (e.status === 'completed' && webdavEnabled()) {
-                    <button class="row-action media" (click)="addToMedia(e.id)" title="Add to Media Library">▶ media</button>
+                    <button type="button" class="row-action" (click)="addToMedia(e.id)">▶</button>
                   }
-                  <button class="row-action" (click)="openOutput(e)">open</button>
-                  <button class="row-action danger" (click)="remove(e.id)">✕</button>
+                  <button type="button" class="row-action" (click)="openOutput(e)">open</button>
+                  <button type="button" class="row-action danger" (click)="remove(e.id)">✕</button>
                 </td>
               </tr>
             }
-
             @if (filteredEntries().length === 0) {
               <tr>
-                <td colspan="7" class="empty-cell">
-                  @if (entries().length === 0) {
-                    No download history yet. Finished jobs will show up here.
-                  } @else {
-                    No entries match the current filter.
-                  }
-                </td>
+                <td colspan="7" class="empty-cell">No rows.</td>
               </tr>
             }
           </tbody>
@@ -128,14 +204,89 @@ type TimeFilter = '7d' | '30d' | 'all';
   `,
   styles: [`
     :host { display: block; }
+    .hist-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 8px;
+    }
+    .hist-search { flex: 1; min-width: 200px; margin-bottom: 0; }
+    .hist-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    mat-icon.filter-on { color: var(--tint); }
+    .hist-count {
+      font: var(--font-footnote);
+      color: var(--text-secondary);
+      margin: 0 0 12px;
+    }
+    .filter-menu-body {
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      min-width: 220px;
+    }
+    .filter-menu-body label {
+      font: var(--font-footnote);
+      color: var(--text-secondary);
+    }
+    .filter-menu-body select {
+      min-height: 40px;
+      border-radius: 8px;
+      border: 1px solid var(--line);
+      background: var(--panel2);
+      color: var(--text);
+      padding: 6px 8px;
+    }
     .e-name { color: var(--text); font-size: 13px; }
     .e-name.dim { color: var(--mute); }
-    .e-err { color: var(--danger); font-size: 11px; margin-top: 2px; opacity: .8; }
-    .empty-cell {
-      text-align: center; padding: 36px 20px !important;
-      color: var(--mute); font-size: 13px;
+    .group-box__title.dim { color: var(--mute); }
+    .hist-item {
+      position: relative;
+      overflow: hidden;
     }
-    .row-action.media { color: var(--accent, #7c6af7); border-color: var(--accent, #7c6af7); }
+    .hist-item::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--tint);
+      border-radius: var(--radius-card) 0 0 var(--radius-card);
+    }
+    .hist-item--ok::before { background: var(--accent2); }
+    .hist-item--fail::before { background: var(--danger); }
+    .stage-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      margin: 6px 0 2px;
+    }
+    .stage-chip {
+      font: 10px/1.2 -apple-system, sans-serif;
+      padding: 3px 7px;
+      border-radius: 6px;
+      background: var(--tint-soft);
+      color: var(--text);
+    }
+    .stage-chip--bad {
+      color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 20%, var(--card));
+    }
+    .e-err { color: var(--danger); font: var(--font-footnote); margin: 0 0 6px; opacity: 0.9; }
+    .hist-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .empty-cell {
+      text-align: center;
+      padding: 36px 20px !important;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
   `],
 })
 export class HistoryViewComponent implements OnInit, OnDestroy {
@@ -145,6 +296,15 @@ export class HistoryViewComponent implements OnInit, OnDestroy {
   filterCategory = '';
   filterTime: TimeFilter = '7d';
   nameFilter = '';
+
+  hasActiveFilters(): boolean {
+    return (
+      this.nameFilter.trim() !== '' ||
+      this.filterStatus !== 'all' ||
+      this.filterCategory !== '' ||
+      this.filterTime !== '7d'
+    );
+  }
 
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 

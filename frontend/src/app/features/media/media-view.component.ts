@@ -51,7 +51,7 @@ const AUDIO_EXTS = new Set(['mp3', 'flac', 'aac', 'ogg', 'wav', 'm4a', 'opus']);
     <!-- Header bar -->
     <div class="panel">
       <h3>Media Library
-        <span class="hint">WebDAV endpoint: <code>{{ davBase }}</code></span>
+        <span class="hint dav-hint-line">WebDAV: <code class="dav-url-block">{{ davBase }}</code></span>
         <button class="btn ghost sm" style="margin-left:8px" (click)="copyBase()">Copy URL</button>
         <button class="btn ghost sm" style="margin-left:4px" (click)="loadContent()">↻ Refresh</button>
       </h3>
@@ -72,7 +72,7 @@ const AUDIO_EXTS = new Set(['mp3', 'flac', 'aac', 'ogg', 'wav', 'm4a', 'opus']);
             then wait a few seconds for the pipeline to process the NZB.
           </div>
         } @else {
-          <table class="data content-table">
+          <table class="data content-table data-mobile-cards">
             <thead>
               <tr>
                 <th>Name</th>
@@ -209,6 +209,25 @@ const AUDIO_EXTS = new Set(['mp3', 'flac', 'aac', 'ogg', 'wav', 'm4a', 'opus']);
     table.clients td { font-size: 13px; }
     table.clients td:last-child { color: var(--mute); font-size: 12px; }
     table.clients code { font-size: 11px; }
+
+    .dav-hint-line { display: block; }
+    .dav-url-block { display: inline-block; max-width: 100%; word-break: break-all; }
+    @media (max-width: 1023px) {
+      .dav-hint-line { margin-top: 8px; }
+    }
+    .touch-action {
+      min-height: 44px;
+      min-width: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 10px;
+      box-sizing: border-box;
+    }
+    @media (max-width: 1023px) {
+      .actions { white-space: normal; }
+      .actions .touch-action { margin: 2px 4px 2px 0; }
+    }
   `],
 })
 export class MediaViewComponent implements OnInit, OnDestroy {

@@ -1,10 +1,11 @@
-import { Component, OnInit, signal, computed } from '@angular/core';
+import { Component, OnInit, OnDestroy, signal, computed, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterModule } from '@angular/router';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { ApiService } from '../../core/services/api.service';
 import { StatusResponse } from '../../core/models/queue.model';
+import { ThemeService, type TintName } from '../../core/services/theme.service';
 
 interface ServerConfig {
   id: string; name: string; host: string; port: number; ssl: boolean; ssl_verify: boolean;
@@ -28,7 +29,7 @@ interface ServerStats {
 type Tab =
   | 'servers' | 'rss-cfg'
   | 'categories' | 'postproc' | 'paths' | 'dav'
-  | 'general' | 'api' | 'telemetry' | 'about';
+  | 'general' | 'api' | 'telemetry' | 'display' | 'about';
 
 interface DavConfig {
   auto_send_all: boolean;
@@ -76,10 +77,28 @@ function emptyCategory(): CategoryConfig {
         <button [class.active]="tab === 'general'"    (click)="tab = 'general'">General</button>
         <button [class.active]="tab === 'api'"        (click)="tab = 'api'">API &amp; SABnzbd compat</button>
         <button [class.active]="tab === 'telemetry'"  (click)="tab = 'telemetry'">Logging &amp; telemetry</button>
+        <div class="sg">Interface</div>
+        <button [class.active]="tab === 'display'"   (click)="tab = 'display'">Display</button>
         <button [class.active]="tab === 'about'"      (click)="tab = 'about'">About</button>
       </aside>
 
       <div class="settings-main">
+        <div class="settings-tab-select hide-desktop">
+          <label for="settingsTab">Section</label>
+          <select id="settingsTab" [ngModel]="tab" (ngModelChange)="onTabSelect($event)">
+            <option value="servers">News servers</option>
+            <option value="rss-cfg">RSS feeds</option>
+            <option value="categories">Categories</option>
+            <option value="postproc">Post-processing</option>
+            <option value="paths">Paths &amp; disk</option>
+            @if (webdavEnabled()) { <option value="dav">Media Library (DAV)</option> }
+            <option value="general">General</option>
+            <option value="api">API &amp; SABnzbd</option>
+            <option value="telemetry">Logging &amp; telemetry</option>
+            <option value="display">Display</option>
+            <option value="about">About</option>
+          </select>
+        </div>
 
         <!-- =========== SERVERS =========== -->
         @if (tab === 'servers') {
@@ -100,6 +119,9 @@ function emptyCategory(): CategoryConfig {
                 <div class="drag">⋮⋮</div>
                 <div>
                   <div class="title" [class.dim]="!s.enabled">
+                    @if (s.enabled) {
+                      <span class="srv-online-dot" title="Enabled"></span>
+                    }
                     {{ s.name || s.host }}
                     <span class="pill" [class.ok]="s.enabled" [class.warn]="!s.enabled" style="margin-left:6px">
                       ● {{ s.enabled ? 'enabled' : 'disabled' }}
@@ -279,7 +301,7 @@ function emptyCategory(): CategoryConfig {
 
           <div class="panel">
             <div class="body flush">
-              <table class="data">
+              <table class="data tbl-desktop-only">
                 <thead>
                   <tr>
                     <th>Name</th>
@@ -305,6 +327,23 @@ function emptyCategory(): CategoryConfig {
                   }
                 </tbody>
               </table>
+              <div class="list-mobile-only category-cards">
+                @for (c of categories(); track c.name) {
+                  <div class="group-box">
+                    <div class="group-box__caption">Category</div>
+                    <div class="group-box__title">{{ c.name }}</div>
+                    <p class="cat-meta"><code class="out-dir">{{ c.output_dir || '(default)' }}</code></p>
+                    <p class="cat-meta pp">{{ ppLabel(c.post_processing) }}</p>
+                    <div class="cat-card-actions">
+                      <button class="row-action" (click)="editCategory(c)">Edit</button>
+                      <button class="row-action danger" (click)="deleteCategory(c.name)">Delete</button>
+                    </div>
+                  </div>
+                }
+                @if (categories().length === 0 && !editingCategory) {
+                  <div class="empty">No categories configured.</div>
+                }
+              </div>
             </div>
           </div>
 
@@ -647,6 +686,98 @@ function emptyCategory(): CategoryConfig {
           </div>
         }
 
+        <!-- =========== DISPLAY (Ruddarr-style theme) =========== -->
+        @if (tab === 'display') {
+          <div class="section-head">
+            <div>
+              <h2>Display</h2>
+              <div class="sub">Color scheme and accent (stored in this browser).</div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <h3>Appearance</h3>
+            <div class="body">
+              <div class="form">
+                <label>Color scheme</label>
+                <select
+                  [ngModel]="theme.mode()"
+                  (ngModelChange)="theme.setMode($any($event))"
+                >
+                  <option value="auto">Automatic</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                  <option value="oled">OLED (Pure Black)</option>
+                </select>
+                <div class="help">Automatic follows the system (Light/Dark). OLED uses true black for AMOLED displays.</div>
+
+                <label>Accent</label>
+                <div class="tint-grid" role="list">
+                  @for (tn of tintNames; track tn) {
+                    <button
+                      type="button"
+                      class="tint-swatch"
+                      [class.active]="theme.tint() === tn"
+                      [attr.aria-pressed]="theme.tint() === tn"
+                      [attr.aria-label]="'Accent ' + tn"
+                      [attr.data-tint]="tn"
+                      (click)="theme.setTint(tn)"
+                    ></button>
+                  }
+                </div>
+
+                <label class="live-preview-label">Live preview</label>
+                <div
+                  class="display-preview display-preview--live"
+                  role="region"
+                  aria-label="Live theme preview: reflects color scheme and accent"
+                >
+                  <div class="dp-frame">
+                    <div class="dp-topbar">
+                      <span class="dp-brand">rust<span class="dp-brand-t">nzb</span></span>
+                      <span class="dp-live tabular-nums">
+                        <span class="dp-live-dot" aria-hidden="true"></span>
+                        {{ previewSpeedText() }}
+                        <span class="dp-sep">·</span> 2 queued
+                      </span>
+                    </div>
+                    <div class="dp-cards">
+                      <div class="dp-card dp-card--stripe">
+                        <div class="dp-card-lbl">Download speed</div>
+                        <div class="dp-card-val tabular-nums">{{ previewSpeedText() }}</div>
+                        <div class="dp-spark" aria-hidden="true">
+                          <span class="dp-spark-b"></span>
+                          <span class="dp-spark-b"></span>
+                          <span class="dp-spark-b"></span>
+                          <span class="dp-spark-b"></span>
+                          <span class="dp-spark-b"></span>
+                        </div>
+                      </div>
+                      <div class="dp-card">
+                        <div class="dp-card-lbl">Queue</div>
+                        <div class="dp-card-val tabular-nums">2</div>
+                        <div class="dp-card-sub">1.2 GB left</div>
+                      </div>
+                    </div>
+                    <div class="dp-chips" aria-hidden="true">
+                      <span class="dp-chip dp-chip--on">All</span>
+                      <span class="dp-chip">Active</span>
+                    </div>
+                    <div class="dp-row">
+                      <span class="dp-dot" aria-hidden="true"></span>
+                      <div class="dp-row-txt">
+                        <div class="dp-title">Release.sample.1080p.mkv</div>
+                        <div class="dp-meta">downloading <span class="dp-sep">·</span> 64% <span class="dp-sep">·</span> ETA 4m</div>
+                      </div>
+                      <div class="dp-vbar" aria-hidden="true"><div class="dp-vbar-fill"></div></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        }
+
         <!-- =========== ABOUT =========== -->
         @if (tab === 'about') {
           <div class="section-head">
@@ -678,6 +809,66 @@ function emptyCategory(): CategoryConfig {
     :host { display: block; }
 
     .settings-shell { display: grid; grid-template-columns: 220px 1fr; gap: 16px; }
+    @media (max-width: 1023px) {
+      .settings-shell { grid-template-columns: 1fr; }
+      .settings-side { display: none; }
+    }
+    .settings-tab-select {
+      margin-bottom: 16px;
+    }
+    .settings-tab-select label {
+      display: block;
+      font: var(--font-footnote);
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+    .settings-tab-select select {
+      width: 100%;
+      min-height: 44px;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel2);
+      color: var(--text);
+      padding: 0 12px;
+      font: var(--font-body);
+    }
+    @media (min-width: 1024px) {
+      .hide-desktop { display: none !important; }
+    }
+    @media (max-width: 1023px) {
+      .hide-desktop { display: block; }
+    }
+    .tint-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      grid-column: 1 / -1;
+    }
+    @media (min-width: 768px) {
+      .tint-grid { grid-column: 2; }
+    }
+    .tint-swatch {
+      width: 36px;
+      height: 36px;
+      border-radius: 50%;
+      border: 2px solid var(--line);
+      cursor: pointer;
+      padding: 0;
+      background: var(--sw, #888);
+    }
+    .tint-swatch.active {
+      box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--tint);
+    }
+    .tint-swatch[data-tint='blue'] { --sw: #007aff; }
+    .tint-swatch[data-tint='purple'] { --sw: #a855f7; }
+    .tint-swatch[data-tint='green'] { --sw: #34c759; }
+    .tint-swatch[data-tint='red'] { --sw: #ff3b30; }
+    .tint-swatch[data-tint='orange'] { --sw: #ff9500; }
+    .tint-swatch[data-tint='yellow'] { --sw: #ffcc00; }
+    .tint-swatch[data-tint='mono'] { --sw: #8e8e93; }
+    .tint-swatch[data-tint='brown'] { --sw: #a2845e; }
+    .tint-swatch[data-tint='barbie'] { --sw: #ff69b4; }
+    .tint-swatch[data-tint='plex'] { --sw: #e5a00d; }
 
     .settings-side {
       background: var(--panel);
@@ -720,8 +911,226 @@ function emptyCategory(): CategoryConfig {
     .settings-side button:hover { opacity: 1; background: var(--panel2); }
     .settings-side button.active {
       opacity: 1;
+      color: var(--tint);
+      background: color-mix(in srgb, var(--tint) 14%, transparent);
+      border-radius: var(--radius-pill);
+      font-weight: 600;
+    }
+    .live-preview-label {
+      color: var(--text-secondary);
+      font: var(--font-footnote);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-top: 12px;
+      grid-column: 1 / -1;
+    }
+    @media (min-width: 768px) {
+      .live-preview-label { grid-column: 1; }
+    }
+    .display-preview--live {
+      grid-column: 1 / -1;
+      position: relative;
+      border-radius: var(--radius-card);
+      margin-top: 4px;
+      overflow: hidden;
+      background: var(--bg);
+      box-shadow: var(--card-elev);
+    }
+    @media (min-width: 768px) {
+      .display-preview--live { grid-column: 2; }
+    }
+    .dp-frame {
+      padding: 12px 12px 14px;
+      background: var(--bg);
+    }
+    .dp-topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-height: 32px;
+      margin-bottom: 10px;
+      padding: 4px 8px;
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--bg) 80%, transparent);
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+      box-shadow: 0 0 0 1px var(--line);
+    }
+    @supports not (backdrop-filter: blur(8px)) {
+      .dp-topbar { background: var(--card); }
+    }
+    .dp-brand {
+      font: 600 12px/1.2 -apple-system, 'Inter', sans-serif;
+      color: var(--text);
+    }
+    .dp-brand-t { color: var(--tint); }
+    .dp-live {
+      font: 10px/1.2 -apple-system, sans-serif;
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      white-space: nowrap;
+    }
+    .dp-sep { opacity: 0.4; }
+    .dp-live-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--tint);
+      margin-right: 2px;
+      animation: dp-pulse 1.2s var(--ease-out-soft) infinite;
+    }
+    @keyframes dp-pulse {
+      0%,
+      100% { transform: scale(1); opacity: 0.85; }
+      50% { transform: scale(1.15); opacity: 0.5; }
+    }
+    .dp-cards {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .dp-card {
+      position: relative;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: var(--card);
+      box-shadow: var(--card-elev);
+      overflow: hidden;
+    }
+    .dp-card--stripe::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      width: 3px;
+      background: var(--tint);
+      border-radius: 12px 0 0 12px;
+    }
+    .dp-card-lbl {
+      font: 9px/1.2 -apple-system, sans-serif;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary);
+    }
+    .dp-card-val {
+      font: 600 15px/1.2 -apple-system, 'Inter', sans-serif;
+      color: var(--text);
+      margin-top: 2px;
+    }
+    .dp-card-sub {
+      font: 10px/1.2 -apple-system, sans-serif;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+    .dp-spark {
+      display: flex;
+      align-items: flex-end;
+      gap: 2px;
+      height: 22px;
+      margin-top: 6px;
+    }
+    .dp-spark-b {
+      flex: 1;
+      min-width: 0;
+      border-radius: 2px;
+      background: var(--tint-soft);
+      animation: dp-spark 1.4s var(--ease-out-soft) infinite;
+    }
+    .dp-spark-b:nth-child(1) { height: 40%; animation-delay: 0s; }
+    .dp-spark-b:nth-child(2) { height: 65%; animation-delay: 0.1s; }
+    .dp-spark-b:nth-child(3) { height: 90%; animation-delay: 0.2s; }
+    .dp-spark-b:nth-child(4) { height: 55%; animation-delay: 0.3s; }
+    .dp-spark-b:nth-child(5) { height: 70%; animation-delay: 0.4s; }
+    @keyframes dp-spark {
+      0%,
+      100% { filter: brightness(0.95); }
+      50% { filter: brightness(1.2); }
+    }
+    .dp-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .dp-chip {
+      font: 10px/1.2 -apple-system, sans-serif;
+      padding: 3px 10px;
+      border-radius: var(--radius-pill);
+      border: 1px solid var(--line);
+      color: var(--text-secondary);
+    }
+    .dp-chip--on {
+      border-color: var(--tint);
+      color: var(--tint);
+      background: color-mix(in srgb, var(--tint) 12%, transparent);
+    }
+    .dp-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border-radius: 12px;
+      background: var(--card);
+      box-shadow: var(--card-elev);
+    }
+    .dp-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--tint);
+      flex-shrink: 0;
+    }
+    .dp-row-txt { min-width: 0; flex: 1; }
+    .dp-title {
+      font: 600 12px/1.25 -apple-system, sans-serif;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dp-meta {
+      font: 10px/1.3 -apple-system, sans-serif;
+      color: var(--text-secondary);
+      margin-top: 2px;
+    }
+    .dp-vbar {
+      width: 4px;
+      height: 36px;
+      border-radius: 2px;
       background: var(--panel2);
-      box-shadow: inset 2px 0 0 var(--accent);
+      position: relative;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+    .dp-vbar-fill {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: var(--tint);
+      height: 64%;
+      animation: dp-vbar 2.2s var(--ease-out-soft) infinite;
+    }
+    @keyframes dp-vbar {
+      0%,
+      100% { height: 52%; }
+      50% { height: 78%; }
+    }
+    .srv-online-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent2);
+      margin-right: 8px;
+      vertical-align: middle;
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent2) 40%, var(--line));
     }
 
     .settings-main { min-width: 0; padding-top: 10px; }
@@ -789,12 +1198,69 @@ function emptyCategory(): CategoryConfig {
     .dir-table { display: flex; flex-direction: column; gap: 0; font-size: 13px; }
     .dir-row { display: grid; grid-template-columns: 100px 1fr; gap: 8px 12px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--line); }
     .dir-row:last-child { border: none; }
+
+    .category-cards { padding: 0 0 8px; }
+    .category-cards .group-box { margin: 0 0 10px; }
+    .cat-meta { margin: 6px 0 0; font: var(--font-subheadline); color: var(--text-secondary); }
+    .out-dir { word-break: break-all; font-size: 12px; }
+    .cat-card-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+    @media (max-width: 1023px) {
+      .srv-row {
+        grid-template-columns: 1fr;
+        align-items: stretch;
+      }
+      .srv-row .drag { display: none; }
+      .srv-row .actions {
+        justify-content: flex-start;
+        padding-top: 10px;
+        border-top: 1px solid var(--line);
+      }
+      .url-cell {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 8px;
+      }
+      .url-cell code { width: 100%; box-sizing: border-box; }
+      .dir-row { grid-template-columns: 1fr; }
+      .srv-stats-panel { padding-left: 14px; }
+    }
   `],
 })
-export class SettingsViewComponent implements OnInit {
+export class SettingsViewComponent implements OnInit, OnDestroy {
   tab: Tab = 'servers';
 
+  /** Drives the animated “live” speed readout in the theme preview. */
+  private readonly previewTick = signal(0);
+  private previewTimer: ReturnType<typeof setInterval> | null = null;
+  /** Fake MB/s for display preview (updates a few times per second). */
+  readonly previewSpeedText = computed(() => {
+    const t = this.previewTick();
+    const mbps = 8.5 + 4.2 * Math.sin(t * 0.35) + 1.1 * Math.sin(t * 0.91);
+    return mbps.toFixed(1) + ' MB/s';
+  });
+
+  readonly theme = inject(ThemeService);
+  readonly tintNames: TintName[] = [
+    'blue',
+    'purple',
+    'green',
+    'red',
+    'orange',
+    'yellow',
+    'mono',
+    'brown',
+    'barbie',
+    'plex',
+  ];
+
   readonly sabnzbdExample = `${typeof location !== 'undefined' ? location.origin : 'http://host:9090'}/sabnzbd/api?apikey=...&mode=queue`;
+
+  onTabSelect(v: string): void {
+    let t = v as Tab;
+    if (t === 'dav' && !this.webdavEnabled()) t = 'servers';
+    this.tab = t;
+  }
 
   // Servers
   servers = signal<ServerConfig[]>([]);
@@ -829,10 +1295,18 @@ export class SettingsViewComponent implements OnInit {
   constructor(private api: ApiService, private snack: MatSnackBar) {}
 
   ngOnInit(): void {
+    this.previewTimer = setInterval(() => this.previewTick.update(n => n + 1), 500);
     this.loadServers();
     this.loadCategories();
     this.loadGeneralSettings();
     this.loadStatus();
+  }
+
+  ngOnDestroy(): void {
+    if (this.previewTimer) {
+      clearInterval(this.previewTimer);
+      this.previewTimer = null;
+    }
   }
 
   loadStatus(): void {
