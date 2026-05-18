@@ -162,16 +162,15 @@ arc-swap.workspace = true
 
 
 
-# Local crate patches are disabled here because ../libs/* is not present in
-# this workspace checkout. We use published crates.io versions by default.
+# Local crate patches: patched nzb-postproc with 7z -p- fix.
+# See patches/nzb-postproc-0.2.5/CHANGES.md for details.
+[patch.crates-io]
+nzb-postproc = { path = "patches/nzb-postproc-0.2.5" }
+
+# Local dev patches for nzb-postproc (7z RAR extraction fix applied).
+# CI should use published crates.io versions — comment this out before release.
 # [patch.crates-io]
-# nzb-web = { path = "../libs/nzb-web" }
-# nzb-dispatch = { path = "../libs/nzb-dispatch" }
-# nzb-nntp = { path = "../libs/nzb-nntp" }
-# nzb-news = { path = "../libs/nzb-news" }
-# nzb-core = { path = "../libs/nzb-core" }
-# nzb-postproc = { path = "../libs/nzb-postproc" }
-# nzb-decode = { path = "../libs/nzb-decode" }
+# nzb-postproc = { path = "patches/nzb-postproc-0.2.5" }
 
 # Local dev patch for nzbdav crates: uncomment when working against unpublished nzbdav-rs changes.
 # CI fetches from the forgejo registry directly, so this must stay commented out.
