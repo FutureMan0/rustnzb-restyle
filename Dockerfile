@@ -50,7 +50,8 @@ FROM lscr.io/linuxserver/baseimage-alpine:3.21
 RUN apk add --no-cache \
         ca-certificates \
         curl \
-        7zip
+        7zip \
+        unrar
 
 COPY --from=builder /build/target/release/rustnzb /usr/local/bin/rustnzb
 
