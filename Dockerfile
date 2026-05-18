@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 FROM rust:1.88-alpine3.21 AS builder
 
-RUN apk add --no-cache musl-dev build-base protoc openssl-dev openssl-libs-static curl nodejs npm git
+RUN apk add --no-cache musl-dev build-base g++ protoc openssl-dev openssl-libs-static curl nodejs npm git
 
 WORKDIR /build
 
@@ -44,19 +44,22 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     fi && \
     cargo build --release --features webdav
 
+# Compile unrar from source (RARLab provides free unrar source)
+RUN curl -fsSL https://www.rarlab.com/rar/unrarsrc-7.1.3.tar.gz | tar xz -C /tmp \
+    && cd /tmp/unrar \
+    && make -j$(nproc) CXX=g++ \
+    && strip unrar
+
 
 FROM lscr.io/linuxserver/baseimage-alpine:3.21
 
 RUN apk add --no-cache \
         ca-certificates \
         curl \
-        7zip \
-        gcompat \
-    # unrar not in Alpine repos (RAR license). Download official binary
-    # and use gcompat for glibc compat on musl.
-    && curl -fsSL https://www.rarlab.com/rar/rarlinux-x64-722.tar.gz | tar xz -C /tmp \
-    && install -m 755 /tmp/rar/unrar /usr/local/bin/unrar \
-    && rm -rf /tmp/rar
+        7zip
+
+# Copy natively compiled unrar (musl, no gcompat needed)
+COPY --from=builder /tmp/unrar/unrar /usr/local/bin/unrar
 
 COPY --from=builder /build/target/release/rustnzb /usr/local/bin/rustnzb
 
