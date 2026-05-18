@@ -167,10 +167,7 @@ arc-swap.workspace = true
 [patch.crates-io]
 nzb-postproc = { path = "patches/nzb-postproc-0.2.5" }
 
-# Local dev patches for nzb-postproc (7z RAR extraction fix applied).
-# CI should use published crates.io versions — comment this out before release.
-# [patch.crates-io]
-# nzb-postproc = { path = "patches/nzb-postproc-0.2.5" }
+# (Legacy comment removed — active patch above)
 
 # Local dev patch for nzbdav crates: uncomment when working against unpublished nzbdav-rs changes.
 # CI fetches from the forgejo registry directly, so this must stay commented out.

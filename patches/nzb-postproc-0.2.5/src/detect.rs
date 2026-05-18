@@ -324,6 +324,16 @@ fn is_cleanup_candidate(name: &str) -> bool {
         return true;
     }
 
+    // Plain 7z archives
+    if name.ends_with(".7z") {
+        return true;
+    }
+
+    // Plain zip archives
+    if name.ends_with(".zip") {
+        return true;
+    }
+
     false
 }
 

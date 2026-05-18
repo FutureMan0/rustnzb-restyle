@@ -14,9 +14,10 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY frontend frontend
 RUN cd frontend && npx ng build --configuration=production
 
-# Copy Rust source
+# Copy Rust source + local crate patches
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src src
+COPY patches patches
 
 # Configure git + cargo registry for private Forgejo deps
 ARG GIT_AUTH_TOKEN
@@ -29,7 +30,7 @@ RUN TOKEN="${GIT_AUTH_TOKEN:-$PLUGIN_PASSWORD}" && \
     else \
       echo "No Forgejo token provided; using crates.io defaults"; \
     fi
-RUN sed -i '/^\[patch\./,/^$/d' Cargo.toml
+# Note: [patch.crates-io] is intentionally kept for the nzb-postproc fix
 
 # RELEASE_OPTIMIZED=true enables fat LTO + single codegen-unit (slow but smaller binary)
 ARG RELEASE_OPTIMIZED=false
