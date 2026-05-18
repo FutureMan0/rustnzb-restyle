@@ -51,7 +51,12 @@ RUN apk add --no-cache \
         ca-certificates \
         curl \
         7zip \
-        unrar
+        gcompat \
+    # unrar not in Alpine repos (RAR license). Download official binary
+    # and use gcompat for glibc compat on musl.
+    && curl -fsSL https://www.rarlab.com/rar/rarlinux-x64-722.tar.gz | tar xz -C /tmp \
+    && install -m 755 /tmp/rar/unrar /usr/local/bin/unrar \
+    && rm -rf /tmp/rar
 
 COPY --from=builder /build/target/release/rustnzb /usr/local/bin/rustnzb
 
