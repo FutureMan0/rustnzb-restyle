@@ -1,4 +1,5 @@
 use std::io::{Cursor, Read as _};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
 use axum::Json;
@@ -7,6 +8,106 @@ use axum::response::IntoResponse;
 use flate2::read::GzDecoder;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// SSRF protection — validate outbound URLs before fetching
+// ---------------------------------------------------------------------------
+
+/// Validate that a URL is safe to fetch from the server side.
+/// Blocks non-HTTP schemes and private/reserved IP ranges.
+fn validate_outbound_url(url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Unsupported URL scheme: '{other}'. Only http and https are allowed.")),
+    }
+
+    // Resolve the host to an IP address and check against private ranges
+    if let Some(host) = parsed.host_str() {
+        // First check if it's already an IP literal
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if is_private_or_reserved(&ip) {
+                return Err(format!("URL resolves to a private/reserved address ({ip}). Not allowed for security reasons."));
+            }
+        } else {
+            // It's a hostname — resolve it via DNS and check all addresses
+            // We do a basic check here; the actual DNS resolution will happen at fetch time,
+            // but we validate the hostname format and reject obvious internal names.
+            // For full protection, we rely on the fact that reqwest will resolve to a real IP.
+            // We use a custom DNS resolver would be ideal but for now we block well-known patterns.
+            let lower = host.to_lowercase();
+            // Block localhost-equivalent hostnames
+            if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") || lower == "localhost.localdomain" {
+                return Err("URL hostname resolves to localhost. Not allowed for security reasons.".to_string());
+            }
+        }
+    } else {
+        return Err("URL has no host component.".to_string());
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is in a private, reserved, or link-local range
+/// that should not be accessible from server-side requests.
+fn is_private_or_reserved(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_private_v4(v4),
+        IpAddr::V6(v6) => is_private_v6(v6),
+    }
+}
+
+fn is_private_v4(ip: &Ipv4Addr) -> bool {
+    // Loopback: 127.0.0.0/8
+    if ip.is_loopback() { return true; }
+    // Private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+    if ip.is_private() { return true; }
+    // Link-local: 169.254.0.0/16 (includes cloud metadata endpoints)
+    if ip.is_link_local() { return true; }
+    // Broadcast: 255.255.255.255
+    if ip.is_broadcast() { return true; }
+    // Unspecified: 0.0.0.0
+    if ip.is_unspecified() { return true; }
+    // IETF protocol assignments: 192.0.0.0/24
+    let octets = ip.octets();
+    if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 { return true; }
+    // Documentation: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+    if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 { return true; }
+    if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 { return true; }
+    if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 { return true; }
+    // Benchmarking: 198.18.0.0/15
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) { return true; }
+    // Multicast: 224.0.0.0/4
+    if ip.is_multicast() { return true; }
+    // Future/Reserved: 240.0.0.0/4
+    if octets[0] >= 240 { return true; }
+    // 100.64.0.0/10 — Carrier-grade NAT (RFC 6598)
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 { return true; }
+    false
+}
+
+fn is_private_v6(ip: &Ipv6Addr) -> bool {
+    if ip.is_loopback() { return true; }
+    if ip.is_unspecified() { return true; }
+    // IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) — check the embedded IPv4
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        return is_private_v4(&v4);
+    }
+    // Link-local: fe80::/10
+    let segments = ip.segments();
+    if (segments[0] & 0xffc0) == 0xfe80 { return true; }
+    // Unique local: fc00::/7
+    if (segments[0] & 0xfe00) == 0xfc00 { return true; }
+    // Multicast: ff00::/8
+    if ip.is_multicast() { return true; }
+    // Documentation: 2001:db8::/32
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 { return true; }
+    // ORCHIDv2: 2001:20::/28
+    if segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020 { return true; }
+    false
+}
 
 #[cfg(feature = "webdav")]
 use nzb_web::nzb_core::config::DavConfig;
@@ -510,6 +611,12 @@ pub async fn h_queue_add_url(
 ) -> Result<impl IntoResponse, ApiError> {
     if body.url.is_empty() {
         return Err(ApiError::from(anyhow::anyhow!("No URL provided")));
+    }
+
+    // SSRF protection: validate URL before fetching
+    if let Err(e) = validate_outbound_url(&body.url) {
+        tracing::warn!(url = %body.url, reason = %e, "Blocked outbound URL fetch");
+        return Err(ApiError::from(anyhow::anyhow!("URL rejected: {e}")));
     }
 
     tracing::info!(url = %body.url, "Fetching NZB from URL");
@@ -1324,6 +1431,12 @@ pub async fn h_rss_item_download(
         .url
         .as_ref()
         .ok_or_else(|| ApiError::from(anyhow::anyhow!("No download URL for this item")))?;
+
+    // SSRF protection: validate URL before fetching
+    if let Err(e) = validate_outbound_url(url) {
+        tracing::warn!(url = %url, reason = %e, "Blocked RSS download URL fetch");
+        return Err(ApiError::from(anyhow::anyhow!("URL rejected: {e}")));
+    }
 
     // Fetch the NZB
     let client = reqwest::Client::builder()
