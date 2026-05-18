@@ -162,10 +162,11 @@ arc-swap.workspace = true
 
 
 
-# Local crate patches: patched nzb-postproc with 7z -p- fix.
-# See patches/nzb-postproc-0.2.5/CHANGES.md for details.
+# Local crate patches for bugs in upstream crates.
+# See patches/*/CHANGES.md for details.
 [patch.crates-io]
 nzb-postproc = { path = "patches/nzb-postproc-0.2.5" }
+nzb-web = { path = "patches/nzb-web-0.4.13" }
 
 # (Legacy comment removed — active patch above)
 
