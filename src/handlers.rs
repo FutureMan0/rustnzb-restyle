@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 
 /// Validate that a URL is safe to fetch from the server side.
 /// Blocks non-HTTP schemes and private/reserved IP ranges.
-fn validate_outbound_url(url: &str) -> Result<(), String> {
+///
+/// Performs actual DNS resolution so that domains pointing to internal IPs
+/// (e.g. via DNS rebinding) are rejected.
+async fn validate_outbound_url(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
 
     // Only allow http and https schemes
@@ -32,15 +35,43 @@ fn validate_outbound_url(url: &str) -> Result<(), String> {
                 return Err(format!("URL resolves to a private/reserved address ({ip}). Not allowed for security reasons."));
             }
         } else {
-            // It's a hostname — resolve it via DNS and check all addresses
-            // We do a basic check here; the actual DNS resolution will happen at fetch time,
-            // but we validate the hostname format and reject obvious internal names.
-            // For full protection, we rely on the fact that reqwest will resolve to a real IP.
-            // We use a custom DNS resolver would be ideal but for now we block well-known patterns.
+            // It's a hostname — resolve via DNS and check ALL resulting addresses.
+            // This prevents DNS-rebinding attacks where an external domain is pointed
+            // at an internal IP (127.0.0.1, 169.254.169.254, etc.).
             let lower = host.to_lowercase();
-            // Block localhost-equivalent hostnames
-            if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") || lower == "localhost.localdomain" {
-                return Err("URL hostname resolves to localhost. Not allowed for security reasons.".to_string());
+
+            // Fast-path: block well-known internal hostnames before hitting DNS
+            if lower == "localhost"
+                || lower.ends_with(".localhost")
+                || lower.ends_with(".local")
+                || lower == "localhost.localdomain"
+            {
+                return Err(
+                    "URL hostname resolves to localhost. Not allowed for security reasons."
+                        .to_string(),
+                );
+            }
+
+            // Perform actual DNS resolution
+            let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+            let lookup_target = format!("{host}:{port}");
+            match tokio::net::lookup_host(&lookup_target).await {
+                Ok(addrs) => {
+                    for addr in addrs {
+                        if is_private_or_reserved(&addr.ip()) {
+                            return Err(format!(
+                                "URL hostname '{host}' resolves to a private/reserved address ({}). \
+                                 Not allowed for security reasons.",
+                                addr.ip()
+                            ));
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Could not resolve hostname '{host}': {e}"
+                    ));
+                }
             }
         }
     } else {
@@ -614,7 +645,7 @@ pub async fn h_queue_add_url(
     }
 
     // SSRF protection: validate URL before fetching
-    if let Err(e) = validate_outbound_url(&body.url) {
+    if let Err(e) = validate_outbound_url(&body.url).await {
         tracing::warn!(url = %body.url, reason = %e, "Blocked outbound URL fetch");
         return Err(ApiError::from(anyhow::anyhow!("URL rejected: {e}")));
     }
@@ -1433,7 +1464,7 @@ pub async fn h_rss_item_download(
         .ok_or_else(|| ApiError::from(anyhow::anyhow!("No download URL for this item")))?;
 
     // SSRF protection: validate URL before fetching
-    if let Err(e) = validate_outbound_url(url) {
+    if let Err(e) = validate_outbound_url(url).await {
         tracing::warn!(url = %url, reason = %e, "Blocked RSS download URL fetch");
         return Err(ApiError::from(anyhow::anyhow!("URL rejected: {e}")));
     }
