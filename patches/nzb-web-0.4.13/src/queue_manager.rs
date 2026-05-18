@@ -1146,34 +1146,14 @@ impl QueueManager {
                                             "File assembly complete"
                                         );
 
-                                        // Direct unpack: feed completed RAR volumes to the
-                                        // unpacker so extraction overlaps with download.
-                                        if self.direct_unpack_enabled.load(Ordering::Relaxed)
-                                            && state.job.articles_failed == 0
-                                            && let Some(vol_info) = parse_rar_volume(&file.filename)
-                                        {
-                                            if state.direct_unpacker.is_none() {
-                                                state.direct_unpacker = DirectUnpacker::new(
-                                                    &state.job.work_dir,
-                                                    &state.job.output_dir,
-                                                    state.job.password.clone(),
-                                                );
-                                                if state.direct_unpacker.is_some() {
-                                                    info!(
-                                                        job_id = %job_id,
-                                                        "Direct unpack enabled — starting RAR extraction during download"
-                                                    );
-                                                }
-                                            }
-                                            if let Some(ref du) = state.direct_unpacker {
-                                                let path = state.job.work_dir.join(&file.filename);
-                                                du.add_volume(
-                                                    &vol_info.set_name,
-                                                    vol_info.volume_number,
-                                                    path,
-                                                );
-                                            }
-                                        }
+                                        // Direct unpack DISABLED — it hangs silently on RAR5
+                                        // multi-volume archives, producing ~100MB truncated files.
+                                        // Normal post-processing pipeline (unrar via nzb-postproc)
+                                        // handles extraction correctly after download completes.
+                                        //
+                                        // Original code: feeds RAR volumes to DirectUnpacker during
+                                        // download for overlapping I/O. Re-enable only after fixing
+                                        // the -vp interactive prompt handling in direct_unpack.rs.
                                     }
                                     break;
                                 }
