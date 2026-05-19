@@ -1692,45 +1692,72 @@ pub async fn h_servers_health(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<Vec<ServerHealthResult>>, ApiError> {
     let servers = state.config().servers.clone();
-    let mut results = Vec::new();
+
+    // Spawn all health checks concurrently; disabled servers produce a result
+    // directly, enabled servers get a tokio::spawn task with a 15s timeout.
+    let mut handles: Vec<Option<tokio::task::JoinHandle<ServerHealthResult>>> = Vec::new();
 
     for server in &servers {
         if !server.enabled {
-            results.push(ServerHealthResult {
-                id: server.id.clone(),
-                name: server.name.clone(),
-                success: false,
-                message: "Disabled".into(),
-            });
+            handles.push(None);
             continue;
         }
 
         let srv = server.clone();
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(15),
-            test_server_connection(srv),
-        )
-        .await;
+        let id = server.id.clone();
+        let name = server.name.clone();
+        let handle = tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                test_server_connection(srv),
+            )
+            .await;
 
-        match result {
-            Ok(Ok(msg)) => results.push(ServerHealthResult {
-                id: server.id.clone(),
-                name: server.name.clone(),
-                success: true,
-                message: msg,
-            }),
-            Ok(Err(msg)) => results.push(ServerHealthResult {
+            match result {
+                Ok(Ok(msg)) => ServerHealthResult {
+                    id,
+                    name,
+                    success: true,
+                    message: msg,
+                },
+                Ok(Err(msg)) => ServerHealthResult {
+                    id,
+                    name,
+                    success: false,
+                    message: msg,
+                },
+                Err(_) => ServerHealthResult {
+                    id,
+                    name,
+                    success: false,
+                    message: "Connection timed out (15s)".into(),
+                },
+            }
+        });
+        handles.push(Some(handle));
+    }
+
+    // Collect results in order (preserving server order).
+    let mut results = Vec::with_capacity(servers.len());
+    for (server, handle_opt) in servers.iter().zip(handles) {
+        match handle_opt {
+            None => results.push(ServerHealthResult {
                 id: server.id.clone(),
                 name: server.name.clone(),
                 success: false,
-                message: msg,
+                message: "Disabled".into(),
             }),
-            Err(_) => results.push(ServerHealthResult {
-                id: server.id.clone(),
-                name: server.name.clone(),
-                success: false,
-                message: "Connection timed out (15s)".into(),
-            }),
+            Some(handle) => {
+                // If the spawned task panicked we surface a generic error
+                // instead of propagating the panic across the await boundary.
+                let res = handle.await.unwrap_or_else(|_| ServerHealthResult {
+                    id: server.id.clone(),
+                    name: server.name.clone(),
+                    success: false,
+                    message: "Internal task error".into(),
+                });
+                results.push(res);
+            }
         }
     }
 
