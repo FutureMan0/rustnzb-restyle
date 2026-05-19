@@ -297,11 +297,21 @@ pub async fn h_header_mark_read(
     Path(_group_id): Path<i64>,
     Json(input): Json<nzb_web::nzb_core::models::MarkReadInput>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let mut count = 0u64;
-    for id in &input.header_ids {
-        let _ = state.queue_manager.with_db(|db| db.header_mark_read(*id));
-        count += 1;
-    }
+    // Batch all mark-read operations in a single DB transaction instead of
+    // N separate calls.  This avoids repeatedly acquiring/releasing the DB
+    // lock and also correctly counts only rows that were actually updated.
+    let count = state
+        .queue_manager
+        .with_db(|db| {
+            let mut marked = 0u64;
+            for id in &input.header_ids {
+                if db.header_mark_read(*id).is_ok() {
+                    marked += 1;
+                }
+            }
+            marked
+        })
+        .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "marked": count })))
 }
 
