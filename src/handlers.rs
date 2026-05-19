@@ -2032,6 +2032,13 @@ pub async fn h_import_sabnzbd_api(
 ) -> Result<impl IntoResponse, ApiError> {
     let base_url = req.url.trim_end_matches('/');
 
+    // SSRF protection: validate URL before fetching (consistent with h_queue_add_url
+    // and h_rss_item_download which both call validate_outbound_url).
+    if let Err(e) = validate_outbound_url(base_url).await {
+        tracing::warn!(url = %base_url, reason = %e, "Blocked SABnzbd import URL fetch");
+        return Err(ApiError::from(anyhow::anyhow!("URL rejected: {e}")));
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
