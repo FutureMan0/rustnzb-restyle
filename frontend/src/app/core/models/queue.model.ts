@@ -61,6 +61,13 @@ export interface HistoryEntry {
   error_message: string | null;
   server_stats: ServerArticleStats[];
   has_nzb_data: boolean;
+  total_duration_secs: number;
+  download_duration_secs: number | null;
+  post_processing_duration_secs: number;
+  repair_duration_secs: number;
+  extract_duration_secs: number;
+  move_duration_secs: number | null;
+  completed_successfully: boolean;
 }
 
 export interface LogEntry {

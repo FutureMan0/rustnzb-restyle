@@ -8,7 +8,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
-import { finalize, forkJoin, Observable } from 'rxjs';
+import { finalize, Observable } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
 import { NzbJob, QueueResponse, StatusResponse } from '../../core/models/queue.model';
 import { QueueJobSheetComponent } from './queue-job-sheet.component';
@@ -1107,6 +1107,7 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   speedHistory = signal<number[]>([]);
   speedFlash = signal(false);
   actionPendingIds = signal<Set<string>>(new Set());
+  queueMovePending = signal(false);
   private lastQueueSpeedBps = 0;
 
   /** When showing the sample queue, id order after drag (preview only); `null` = default. */
@@ -1258,7 +1259,7 @@ export class QueueViewComponent implements OnInit, OnDestroy {
 
   /** Drag-and-drop enabled: filter «All» and at least one row (real or sample). */
   canDragInTable(): boolean {
-    return this.filterStatus === 'all' && this.displayJobs().length > 0;
+    return this.filterStatus === 'all' && !this.queueMovePending() && this.displayJobs().length > 0;
   }
 
   onQueueDrop(event: CdkDragDrop<NzbJob>): void {
@@ -1277,21 +1278,20 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     if (p < 0 || p >= list.length) return;
     const job = (event.item.data as NzbJob) ?? list[p];
     if (this.isDemoJob(job) || !list.some(j => j.id === job.id)) return;
-    this.api.post(`/queue/${job.id}/move`, { position: c }).subscribe({
+    const optimistic = [...list];
+    moveItemInArray(optimistic, p, c);
+    this.jobs.set(optimistic.map((j, i) => ({ ...j, priority: this.priorityValueForIndex(i) })));
+    this.queueMovePending.set(true);
+    this.api.post(`/queue/${job.id}/move`, { position: c, apply_position_priority: true }).pipe(
+      finalize(() => this.queueMovePending.set(false)),
+    ).subscribe({
       next: () => {
-        this.api.get<QueueResponse>('/queue').subscribe({
-          next: (r) => {
-            this.applyQueueResponse(r);
-            this.applyPositionPrioritiesThenReload(r.jobs);
-          },
-          error: () => {
-            this.snackBar.open('Move ok, but queue could not be reloaded.', 'OK', { duration: 3000 });
-            this.loadQueue();
-          },
-        });
+        this.snackBar.open('Priority applied', 'OK', { duration: 1500 });
+        this.loadQueue();
       },
       error: () => {
         this.snackBar.open('Could not move job.', 'OK', { duration: 3000 });
+        this.loadQueue();
       },
     });
   }
@@ -1323,31 +1323,6 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   priorityLabel(n: number): string {
     const m: Record<number, string> = { 0: 'Low', 1: 'Normal', 2: 'High', 3: 'Force' };
     return m[n] ?? '—';
-  }
-
-  private applyPositionPrioritiesThenReload(jobs: NzbJob[]): void {
-    if (this.inDummyMode() || jobs.length === 0) {
-      this.loadQueue();
-      return;
-    }
-    const puts: Observable<unknown>[] = [];
-    for (let i = 0; i < jobs.length; i++) {
-      const want = this.priorityValueForIndex(i);
-      if (jobs[i].priority !== want) {
-        puts.push(this.api.put(`/queue/${jobs[i].id}/priority`, { priority: want }));
-      }
-    }
-    if (puts.length === 0) {
-      this.loadQueue();
-      return;
-    }
-    forkJoin(puts).subscribe({
-      next: () => this.loadQueue(),
-      error: () => {
-        this.snackBar.open('Order updated; priority not adjusted for all jobs.', 'OK', { duration: 4000 });
-        this.loadQueue();
-      },
-    });
   }
 
   private applyQueueResponse(r: QueueResponse): void {

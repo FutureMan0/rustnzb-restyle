@@ -27,7 +27,7 @@ use std::time::Duration;
 use harness::nzb_fixture::NzbFixture;
 use harness::{HarnessBuilder, ServerProfile, yenc_articles};
 use nzb_nntp::testutil::MockConfig;
-use nzb_web::nzb_core::models::JobStatus;
+use nzb_web::nzb_core::models::{JobStatus, Priority};
 
 // ---------------------------------------------------------------------------
 // Fixture helpers — return fully owned data so tests don't fight the borrow
@@ -445,5 +445,116 @@ async fn unreachable_primary_does_not_hang_backup() {
         settled,
         "job never left Downloading when primary was unreachable: status={} downloaded={} failed={}",
         view.status, view.articles_downloaded, view.articles_failed
+    );
+}
+
+#[tokio::test]
+async fn moving_queued_job_to_top_preempts_lower_priority_download() {
+    let (xml_a, mut yenc_a, _mids_a) = make_fixture("preempt-a", 16);
+    let (xml_b, yenc_b, _mids_b) = make_fixture("preempt-b", 1);
+    yenc_a.extend(yenc_b);
+
+    let server = ServerProfile::start(
+        "preempt-srv",
+        MockConfig {
+            articles: yenc_a,
+            response_delay: Some(Duration::from_millis(150)),
+            ..Default::default()
+        },
+        1,
+    )
+    .await;
+
+    let engine = HarnessBuilder::new()
+        .with_server(server)
+        .max_active_downloads(1)
+        .article_timeout(10)
+        .build();
+
+    let first_id = engine.submit_nzb_xml("preempt-a", xml_a).expect("submit first");
+    let second_id = engine
+        .submit_nzb_xml("preempt-b", xml_b)
+        .expect("submit second");
+
+    let ready = engine
+        .wait_for(Duration::from_secs(5), |snap| {
+            let first = snap.job(&first_id).map(|j| j.status);
+            let second = snap.job(&second_id).map(|j| j.status);
+            first == Some(JobStatus::Downloading) && second == Some(JobStatus::Queued)
+        })
+        .await;
+    assert!(ready, "test setup did not reach downloading+queued state");
+
+    engine
+        .queue_manager
+        .move_job_with_position_priorities(&second_id, 0)
+        .expect("move applies priority");
+
+    let preempted = engine
+        .wait_for(Duration::from_secs(5), |snap| {
+            let first = snap.job(&first_id).map(|j| j.status);
+            let second = snap.job(&second_id).map(|j| j.status);
+            first == Some(JobStatus::Paused) && second == Some(JobStatus::Downloading)
+        })
+        .await;
+    assert!(preempted, "higher priority queued job did not preempt lower download");
+
+    let jobs = engine.queue_manager.get_jobs();
+    let second = jobs
+        .iter()
+        .find(|job| job.id == second_id)
+        .expect("second job still in queue");
+    assert_eq!(second.priority, Priority::Force);
+}
+
+#[tokio::test]
+async fn completed_history_entry_keeps_download_and_move_durations() {
+    let (xml, yenc, _mids) = make_fixture("histdone", 1);
+    let server = ServerProfile::start(
+        "history-srv",
+        MockConfig {
+            articles: yenc,
+            ..Default::default()
+        },
+        1,
+    )
+    .await;
+    let engine = HarnessBuilder::new()
+        .with_server(server)
+        .max_active_downloads(1)
+        .article_timeout(10)
+        .build();
+
+    let job_id = engine.submit_nzb_xml("histdone", xml).expect("submit");
+    let mut history = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while std::time::Instant::now() < deadline {
+        history = engine
+            .queue_manager
+            .with_db(|db| db.history_list(10))
+            .expect("history list");
+        if history.iter().any(|entry| entry.id == job_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let entry = history
+        .into_iter()
+        .find(|entry| entry.id == job_id)
+        .expect("completed job should be in history");
+    assert_eq!(entry.status, JobStatus::Completed);
+    assert!(entry.completed_at >= entry.added_at);
+    assert!(
+        entry.stages.iter().any(|stage| stage.name == "Download"),
+        "history should include synthetic Download duration stage"
+    );
+    assert!(
+        entry.stages.iter().any(|stage| stage.name == "Move"),
+        "history should include synthetic Move duration stage"
+    );
+    assert!(
+        !entry.output_dir.as_os_str().is_empty(),
+        "history should keep final output path"
     );
 }

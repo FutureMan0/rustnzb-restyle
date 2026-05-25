@@ -114,10 +114,18 @@ type TimeFilter = '7d' | '30d' | 'all';
               @if (e.stages && e.stages.length > 0) {
                 <div class="stage-chips" aria-label="Post-processing stages">
                   @for (s of e.stages; track s.name) {
-                    <span class="stage-chip" [class.stage-chip--bad]="s.status !== 'ok'">{{ s.name }}</span>
+                    <span class="stage-chip" [class.stage-chip--bad]="s.status === 'failed'">
+                      {{ s.name }} · {{ formatShortDuration(s.duration_secs) }}
+                    </span>
                   }
                 </div>
               }
+              <div class="completion-line">
+                <span>{{ completionSummary(e) }}</span>
+                @if (e.output_dir) {
+                  <span class="path-label">Moved to {{ e.output_dir }}</span>
+                }
+              </div>
               <div class="bullet-row">
                 @if (e.category) {
                   <span class="tag cat">{{ e.category }}</span>
@@ -125,7 +133,7 @@ type TimeFilter = '7d' | '30d' | 'all';
                 }
                 <span class="tabular-nums">{{ formatBytes(e.total_bytes) }}</span>
                 <span class="sep">•</span>
-                <span class="tabular-nums">{{ formatDuration(e.added_at, e.completed_at) }}</span>
+                <span class="tabular-nums">{{ formatHistoryDuration(e) }}</span>
                 <span class="sep">•</span>
                 <span>{{ relativeTime(e.completed_at) }}</span>
               </div>
@@ -165,6 +173,10 @@ type TimeFilter = '7d' | '30d' | 'all';
               <tr>
                 <td>
                   <div class="e-name" [class.dim]="e.status === 'failed'">{{ e.name }}</div>
+                  <div class="e-sub">{{ completionSummary(e) }}</div>
+                  @if (e.output_dir) {
+                    <div class="e-path">{{ e.output_dir }}</div>
+                  }
                   @if (e.error_message) {
                     <div class="e-err">{{ e.error_message }}</div>
                   }
@@ -175,7 +187,10 @@ type TimeFilter = '7d' | '30d' | 'all';
                   }
                 </td>
                 <td class="tabular-nums">{{ formatBytes(e.total_bytes) }}</td>
-                <td class="tabular-nums">{{ formatDuration(e.added_at, e.completed_at) }}</td>
+                <td class="tabular-nums">
+                  <div>{{ formatHistoryDuration(e) }}</div>
+                  <div class="duration-breakdown">{{ durationBreakdown(e) }}</div>
+                </td>
                 <td>{{ relativeTime(e.completed_at) }}</td>
                 <td>
                   <span class="status-pill" [class]="e.status === 'completed' ? 's-ok' : 's-fail'">{{ e.status }}</span>
@@ -240,6 +255,23 @@ type TimeFilter = '7d' | '30d' | 'all';
     }
     .e-name { color: var(--text); font-size: 13px; }
     .e-name.dim { color: var(--mute); }
+    .e-sub,
+    .e-path,
+    .completion-line,
+    .duration-breakdown {
+      font: var(--font-footnote);
+      color: var(--text-secondary);
+    }
+    .e-path,
+    .path-label {
+      word-break: break-all;
+    }
+    .completion-line {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin: 6px 0 2px;
+    }
     .group-box__title.dim { color: var(--mute); }
     .hist-item {
       position: relative;
@@ -378,7 +410,7 @@ export class HistoryViewComponent implements OnInit, OnDestroy {
     let avgDurationLabel = '—';
     if (completed.length > 0) {
       const total = completed.reduce((n, e) => {
-        return n + (new Date(e.completed_at).getTime() - new Date(e.added_at).getTime());
+        return n + this.totalDurationSecs(e) * 1000;
       }, 0);
       avgDurationLabel = this.formatShortDuration(total / completed.length / 1000);
     }
@@ -437,10 +469,11 @@ export class HistoryViewComponent implements OnInit, OnDestroy {
   }
 
   exportCsv(): void {
-    const rows = [['name', 'category', 'size_bytes', 'status', 'added_at', 'completed_at', 'error']];
+    const rows = [['name', 'category', 'size_bytes', 'status', 'duration_secs', 'output_dir', 'added_at', 'completed_at', 'error']];
     for (const e of this.filteredEntries()) {
       rows.push([
         e.name, e.category || '', String(e.total_bytes), e.status,
+        String(this.totalDurationSecs(e)), e.output_dir || '',
         e.added_at, e.completed_at, e.error_message || '',
       ]);
     }
@@ -469,6 +502,43 @@ export class HistoryViewComponent implements OnInit, OnDestroy {
     const ms = new Date(end).getTime() - new Date(start).getTime();
     if (ms <= 0) return '—';
     return this.formatShortDuration(ms / 1000);
+  }
+
+  formatHistoryDuration(e: HistoryEntry): string {
+    return this.formatShortDuration(this.totalDurationSecs(e));
+  }
+
+  totalDurationSecs(e: HistoryEntry): number {
+    if (Number.isFinite(e.total_duration_secs) && e.total_duration_secs > 0) {
+      return e.total_duration_secs;
+    }
+    if (!e.added_at || !e.completed_at) return 0;
+    return Math.max(0, (new Date(e.completed_at).getTime() - new Date(e.added_at).getTime()) / 1000);
+  }
+
+  completionSummary(e: HistoryEntry): string {
+    const parts = [
+      `download ${this.formatOptionalDuration(e.download_duration_secs)}`,
+      `par2/repair ${this.formatShortDuration(e.repair_duration_secs || 0)}`,
+      `extract ${this.formatShortDuration(e.extract_duration_secs || 0)}`,
+    ];
+    if (e.move_duration_secs !== null && e.move_duration_secs !== undefined) {
+      parts.push(`move ${this.formatShortDuration(e.move_duration_secs)}`);
+    }
+    return `${e.completed_successfully ? 'Completed' : 'Failed'} · ${parts.join(' · ')}`;
+  }
+
+  durationBreakdown(e: HistoryEntry): string {
+    return [
+      `download ${this.formatOptionalDuration(e.download_duration_secs)}`,
+      `post ${this.formatShortDuration(e.post_processing_duration_secs || 0)}`,
+      `move ${this.formatOptionalDuration(e.move_duration_secs)}`,
+    ].join(' · ');
+  }
+
+  private formatOptionalDuration(secs: number | null | undefined): string {
+    if (secs === null || secs === undefined || !Number.isFinite(secs)) return '—';
+    return this.formatShortDuration(Math.max(0, secs));
   }
 
   formatShortDuration(secs: number): string {

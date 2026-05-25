@@ -475,6 +475,10 @@ struct JobState {
     file_index: HashMap<String, usize>,
     /// file_id -> segment_number -> article index for hot-path progress updates.
     article_index: HashMap<String, HashMap<u32, usize>>,
+    /// First time this job entered Downloading.
+    download_started_at: Option<DateTime<Utc>>,
+    /// Time the download engine reported terminal download completion/abort.
+    download_finished_at: Option<DateTime<Utc>>,
 }
 
 impl JobState {
@@ -489,6 +493,8 @@ impl JobState {
             hopeless_tracker: None,
             file_index,
             article_index,
+            download_started_at: None,
+            download_finished_at: None,
         }
     }
 
@@ -532,6 +538,24 @@ fn queue_job_summary(state: &JobState) -> QueueJobSummary {
         speed_bps: state.speed.bps(),
         error_message: state.job.error_message.clone(),
         server_stats: state.job.server_stats.clone(),
+    }
+}
+
+fn priority_for_position(position: usize) -> Priority {
+    match position {
+        0 => Priority::Force,
+        1 => Priority::High,
+        2 => Priority::Normal,
+        _ => Priority::Low,
+    }
+}
+
+fn stage_success(name: &str, message: impl Into<String>, duration_secs: f64) -> StageResult {
+    StageResult {
+        name: name.to_string(),
+        status: StageStatus::Success,
+        message: Some(message.into()),
+        duration_secs,
     }
 }
 
@@ -909,6 +933,9 @@ impl QueueManager {
         // Mark as Downloading while still holding the lock
         if let Some(state) = jobs.get_mut(&id) {
             state.job.status = JobStatus::Downloading;
+            if state.download_started_at.is_none() {
+                state.download_started_at = Some(Utc::now());
+            }
             info!(job_id = %id, name = %state.job.name, "Starting queued job");
         }
         Some(id)
@@ -1435,7 +1462,7 @@ impl QueueManager {
                         let mut jobs = self.jobs.lock();
                         if let Some(state) = jobs.get_mut(&job_id) {
                             state.job.status = JobStatus::PostProcessing;
-                            state.job.completed_at = Some(chrono::Utc::now());
+                            state.download_finished_at = Some(Utc::now());
                         }
                     }
                     self.start_next_queued();
@@ -1480,7 +1507,7 @@ impl QueueManager {
                         if let Some(state) = jobs.get_mut(&job_id) {
                             state.job.status = JobStatus::Failed;
                             state.job.error_message = Some(reason);
-                            state.job.completed_at = Some(chrono::Utc::now());
+                            state.download_finished_at = Some(Utc::now());
                         }
                         articles_failed
                     };
@@ -1685,7 +1712,7 @@ impl QueueManager {
     }
 
     /// Move a job's files to output and insert a history entry.
-    fn move_to_history(&self, state: &mut JobState, stages: Vec<StageResult>) {
+    fn move_to_history(&self, state: &mut JobState, mut stages: Vec<StageResult>) {
         let final_status = if state.job.status == JobStatus::Failed {
             // Already marked failed (by pipeline or download with pp disabled)
             JobStatus::Failed
@@ -1703,47 +1730,28 @@ impl QueueManager {
         );
 
         state.job.status = final_status;
+        let final_completed_at = Utc::now();
+        state.job.completed_at = Some(final_completed_at);
+        let download_started_at = state.download_started_at.unwrap_or(state.job.added_at);
+        let download_finished_at = state.download_finished_at.unwrap_or(final_completed_at);
+        let download_duration_secs = (download_finished_at - download_started_at)
+            .num_milliseconds()
+            .max(0) as f64
+            / 1000.0;
+        stages.insert(
+            0,
+            stage_success(
+                "Download",
+                format!(
+                    "{} article(s) downloaded, {} failed",
+                    state.job.articles_downloaded, state.job.articles_failed
+                ),
+                download_duration_secs,
+            ),
+        );
 
-        // Insert into history with real stage results
-        let history_entry = HistoryEntry {
-            id: state.job.id.clone(),
-            name: state.job.name.clone(),
-            category: state.job.category.clone(),
-            status: final_status,
-            total_bytes: state.job.total_bytes,
-            downloaded_bytes: state.job.downloaded_bytes,
-            added_at: state.job.added_at,
-            completed_at: state.job.completed_at.unwrap_or_else(chrono::Utc::now),
-            output_dir: state.job.output_dir.clone(),
-            stages,
-            error_message: state.job.error_message.clone(),
-            server_stats: state.job.server_stats.clone(),
-            nzb_data: state.nzb_data.clone(),
-        };
-
-        let db = self.db.lock();
-        if let Err(e) = db.history_insert(&history_entry) {
-            error!(job_id = %state.job.id, "Failed to insert history: {e}");
-            return;
-        }
-        accumulate_server_stats(&db, &history_entry.server_stats);
-
-        // Capture and persist per-job logs from the ring buffer
-        if let Some(ref log_buffer) = self.log_buffer {
-            let logs = log_buffer.get_entries(Some(&state.job.id), None, None, 5000);
-            if !logs.is_empty() {
-                let logs_json = serde_json::to_string(&logs).unwrap_or_default();
-                if let Err(e) = db.history_store_logs(&state.job.id, &logs_json) {
-                    warn!(job_id = %state.job.id, "Failed to store logs in history: {e}");
-                }
-            }
-        }
-
-        drop(db);
-
-        // Move files from work_dir to output_dir only after history is durable.
-        // This avoids a crash window where files are gone but the queue row
-        // remains the only persisted source of truth.
+        // Move files from work_dir to output_dir before the final history
+        // insert so the history row carries the real file-move duration.
         let move_start = Instant::now();
         if final_status == JobStatus::Completed {
             if let Err(e) = std::fs::create_dir_all(&state.job.output_dir) {
@@ -1770,11 +1778,53 @@ impl QueueManager {
             }
         }
         let file_move_secs = move_start.elapsed().as_secs_f64();
+        stages.push(stage_success(
+            "Move",
+            format!("Moved files to {}", state.job.output_dir.display()),
+            file_move_secs,
+        ));
         info!(
             job_id = %state.job.id,
             file_move_secs = format!("{file_move_secs:.3}"),
             "Finished moving completed files"
         );
+
+        // Insert into history with real stage results
+        let history_entry = HistoryEntry {
+            id: state.job.id.clone(),
+            name: state.job.name.clone(),
+            category: state.job.category.clone(),
+            status: final_status,
+            total_bytes: state.job.total_bytes,
+            downloaded_bytes: state.job.downloaded_bytes,
+            added_at: state.job.added_at,
+            completed_at: final_completed_at,
+            output_dir: state.job.output_dir.clone(),
+            stages,
+            error_message: state.job.error_message.clone(),
+            server_stats: state.job.server_stats.clone(),
+            nzb_data: state.nzb_data.clone(),
+        };
+
+        let db = self.db.lock();
+        if let Err(e) = db.history_insert(&history_entry) {
+            error!(job_id = %state.job.id, "Failed to insert history: {e}");
+            return;
+        }
+        accumulate_server_stats(&db, &history_entry.server_stats);
+
+        // Capture and persist per-job logs from the ring buffer
+        if let Some(ref log_buffer) = self.log_buffer {
+            let logs = log_buffer.get_entries(Some(&state.job.id), None, None, 5000);
+            if !logs.is_empty() {
+                let logs_json = serde_json::to_string(&logs).unwrap_or_default();
+                if let Err(e) = db.history_store_logs(&state.job.id, &logs_json) {
+                    warn!(job_id = %state.job.id, "Failed to store logs in history: {e}");
+                }
+            }
+        }
+
+        drop(db);
 
         // Notify any subscribers (e.g. DAV auto-send) after files are in their
         // final location. Ignore if no listeners.
@@ -1925,7 +1975,7 @@ impl QueueManager {
 
     /// Check whether a queued job has higher priority than a running download,
     /// and if so, pause the lower-priority download to make room.
-    fn preempt_if_needed(self: &Arc<Self>) {
+    pub fn preempt_if_needed(self: &Arc<Self>) {
         let max = self.max_active_downloads.load(Ordering::Relaxed);
 
         loop {
@@ -1999,7 +2049,9 @@ impl QueueManager {
                             );
                         }
                     }
-                    // Loop back — active count decreased, start_next_queued will run
+                    // Start the now-best queued job immediately. Loop again in
+                    // case there are multiple slots or multiple higher jobs.
+                    self.start_next_queued();
                 }
                 _ => {
                     info!(
@@ -2066,6 +2118,9 @@ impl QueueManager {
                 // Job context still lives in the pool — just unpause it.
                 state.job.status = JobStatus::Downloading;
                 state.job.error_message = None;
+                if state.download_started_at.is_none() {
+                    state.download_started_at = Some(Utc::now());
+                }
                 let db = self.db.lock();
                 let _ = db.queue_update_progress(
                     id,
@@ -2086,6 +2141,9 @@ impl QueueManager {
                 } else {
                     state.job.status = JobStatus::Downloading;
                     state.job.error_message = None;
+                    if state.download_started_at.is_none() {
+                        state.download_started_at = Some(Utc::now());
+                    }
                     true
                 }
             }
@@ -2176,6 +2234,49 @@ impl QueueManager {
         let id_str = order.remove(current_pos);
         let new_pos = position.min(order.len());
         order.insert(new_pos, id_str);
+        Ok(())
+    }
+
+    /// Move a job and atomically re-derive priorities from queue position.
+    ///
+    /// Position 0 is Force, 1 is High, 2 is Normal, and all lower rows are Low.
+    pub fn move_job_with_position_priorities(
+        self: &Arc<Self>,
+        id: &str,
+        position: usize,
+    ) -> crate::nzb_core::Result<()> {
+        let updates: Vec<(String, Priority)> = {
+            let mut order = self.job_order.lock();
+            let current_pos = order
+                .iter()
+                .position(|x| x == id)
+                .ok_or_else(|| crate::nzb_core::NzbError::JobNotFound(id.to_string()))?;
+            let id_str = order.remove(current_pos);
+            let new_pos = position.min(order.len());
+            order.insert(new_pos, id_str);
+
+            let mut jobs = self.jobs.lock();
+            let mut updates = Vec::with_capacity(order.len());
+            for (idx, job_id) in order.iter().enumerate() {
+                let priority = priority_for_position(idx);
+                if let Some(state) = jobs.get_mut(job_id)
+                    && state.job.priority != priority
+                {
+                    state.job.priority = priority;
+                    updates.push((job_id.clone(), priority));
+                }
+            }
+            updates
+        };
+
+        if !updates.is_empty() {
+            let db = self.db.lock();
+            for (job_id, priority) in &updates {
+                db.queue_update_priority(job_id, *priority as i32)?;
+            }
+        }
+
+        self.preempt_if_needed();
         Ok(())
     }
 

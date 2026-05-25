@@ -236,6 +236,12 @@ pub struct PauseForQuery {
 #[derive(Deserialize)]
 pub struct MoveJobBody {
     pub position: usize,
+    #[serde(default = "default_apply_position_priority")]
+    pub apply_position_priority: bool,
+}
+
+fn default_apply_position_priority() -> bool {
+    true
 }
 
 #[derive(Deserialize, Serialize)]
@@ -259,80 +265,6 @@ fn priority_rank(priority: Priority) -> u8 {
         Priority::Normal => 1,
         Priority::High => 2,
         Priority::Force => 3,
-    }
-}
-
-fn should_preempt_for_priority_change(
-    state: &AppState,
-    job_id: &str,
-    new_priority: Priority,
-) -> bool {
-    let Some(existing) = state
-        .queue_manager
-        .get_jobs()
-        .into_iter()
-        .find(|j| j.id == job_id)
-    else {
-        return false;
-    };
-    priority_rank(new_priority) > priority_rank(existing.priority)
-}
-
-fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority: Priority) {
-    let qm = &state.queue_manager;
-    if qm.is_paused() {
-        tracing::info!(
-            job_id = %target_id,
-            "Skipping priority preemption because queue is globally paused"
-        );
-        return;
-    }
-
-    let jobs = qm.get_jobs();
-    let Some(target_job) = jobs.iter().find(|job| job.id == target_id) else {
-        tracing::warn!(
-            job_id = %target_id,
-            "Skipping priority preemption because target job was not found in queue"
-        );
-        return;
-    };
-
-    if target_job.status == JobStatus::Downloading {
-        return;
-    }
-
-    if let Err(e) = qm.move_job(target_id, 0) {
-        tracing::warn!(job_id = %target_id, error = %e, "Priority preemption: failed to move job to top");
-    }
-
-    let target_rank = priority_rank(target_priority);
-    let jobs_now = qm.get_jobs();
-    let running_others: Vec<String> = jobs_now
-        .into_iter()
-        .filter(|job| {
-            job.id != target_id
-                && job.status == JobStatus::Downloading
-                && priority_rank(job.priority) < target_rank
-        })
-        .map(|job| job.id)
-        .collect();
-    for running_id in running_others {
-        if let Err(e) = qm.pause_job(&running_id) {
-            tracing::warn!(
-                job_id = %target_id,
-                running_job_id = %running_id,
-                error = %e,
-                "Priority preemption: failed to pause lower-priority running job"
-            );
-        }
-    }
-
-    if let Err(e) = qm.resume_job(target_id) {
-        tracing::warn!(
-            job_id = %target_id,
-            error = %e,
-            "Priority preemption: failed to resume higher-priority job"
-        );
     }
 }
 
@@ -430,11 +362,36 @@ pub struct HistoryResponseEntry {
     pub error_message: Option<String>,
     pub server_stats: Vec<ServerArticleStats>,
     pub has_nzb_data: bool,
+    pub total_duration_secs: f64,
+    pub download_duration_secs: Option<f64>,
+    pub post_processing_duration_secs: f64,
+    pub repair_duration_secs: f64,
+    pub extract_duration_secs: f64,
+    pub move_duration_secs: Option<f64>,
+    pub completed_successfully: bool,
 }
 
 impl From<HistoryEntry> for HistoryResponseEntry {
     fn from(e: HistoryEntry) -> Self {
         let has_nzb = e.nzb_data.is_some();
+        let total_duration_secs =
+            (e.completed_at - e.added_at).num_milliseconds().max(0) as f64 / 1000.0;
+        let download_duration_secs = stage_duration(&e.stages, &["download"]);
+        let repair_duration_secs = stage_duration(&e.stages, &["verify", "repair"]).unwrap_or(0.0);
+        let extract_duration_secs = stage_duration(&e.stages, &["extract"]).unwrap_or(0.0);
+        let move_duration_secs = stage_duration(&e.stages, &["move"]);
+        let post_processing_duration_secs = e
+            .stages
+            .iter()
+            .filter(|stage| {
+                !matches!(
+                    stage.name.to_ascii_lowercase().as_str(),
+                    "download" | "move"
+                )
+            })
+            .map(|stage| stage.duration_secs.max(0.0))
+            .sum();
+        let completed_successfully = e.status == JobStatus::Completed;
         Self {
             id: e.id,
             name: e.name,
@@ -449,8 +406,27 @@ impl From<HistoryEntry> for HistoryResponseEntry {
             error_message: e.error_message,
             server_stats: e.server_stats,
             has_nzb_data: has_nzb,
+            total_duration_secs,
+            download_duration_secs,
+            post_processing_duration_secs,
+            repair_duration_secs,
+            extract_duration_secs,
+            move_duration_secs,
+            completed_successfully,
         }
     }
+}
+
+fn stage_duration(stages: &[StageResult], names: &[&str]) -> Option<f64> {
+    let duration: f64 = stages
+        .iter()
+        .filter(|stage| {
+            let name = stage.name.to_ascii_lowercase();
+            names.iter().any(|wanted| name == *wanted)
+        })
+        .map(|stage| stage.duration_secs.max(0.0))
+        .sum();
+    (duration > 0.0).then_some(duration)
 }
 
 #[derive(Serialize)]
@@ -692,11 +668,7 @@ pub async fn h_queue_set_priority(
         3 => Priority::Force,
         _ => return Err(ApiError::from(anyhow::anyhow!("Invalid priority value"))),
     };
-    let should_preempt = should_preempt_for_priority_change(&state, &id, priority);
     qm.set_job_priority(&id, priority).map_err(ApiError::from)?;
-    if should_preempt {
-        apply_priority_preemption(&state, &id, priority);
-    }
     Ok(Json(SimpleResponse { status: true }))
 }
 
@@ -856,19 +828,12 @@ pub async fn h_queue_move(
     Json(body): Json<MoveJobBody>,
 ) -> Result<Json<SimpleResponse>, ApiError> {
     let qm = &state.queue_manager;
-    qm.move_job(&id, body.position).map_err(ApiError::from)?;
-
-    // If the user explicitly moves a job to the top, trigger an immediate preemption
-    // path so priority-first scheduling takes effect right away.
-    if body.position == 0 {
-        let maybe_priority = qm
-            .get_jobs()
-            .into_iter()
-            .find(|job| job.id == id)
-            .map(|job| job.priority);
-        if let Some(priority) = maybe_priority {
-            apply_priority_preemption(&state, &id, priority);
-        }
+    if body.apply_position_priority {
+        qm.move_job_with_position_priorities(&id, body.position)
+            .map_err(ApiError::from)?;
+    } else {
+        qm.move_job(&id, body.position).map_err(ApiError::from)?;
+        qm.preempt_if_needed();
     }
     Ok(Json(SimpleResponse { status: true }))
 }
@@ -2069,12 +2034,7 @@ pub async fn h_queue_bulk_action(
                     3 => Priority::Force,
                     _ => Priority::Normal,
                 };
-                let should_preempt = should_preempt_for_priority_change(&state, id, priority);
-                let set_result = qm.set_job_priority(id, priority);
-                if set_result.is_ok() && should_preempt {
-                    apply_priority_preemption(&state, id, priority);
-                }
-                set_result
+                qm.set_job_priority(id, priority)
             }
             "category" => {
                 let cat = body.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
