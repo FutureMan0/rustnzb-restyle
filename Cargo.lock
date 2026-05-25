@@ -1822,8 +1822,6 @@ dependencies = [
 [[package]]
 name = "nzb-postproc"
 version = "0.2.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78c9c2ca5744ae1bbb9c340e463a7dea554ab3079c897fe43fb2af66044159d8"
 dependencies = [
  "anyhow",
  "nzb-core",
@@ -1838,8 +1836,6 @@ dependencies = [
 [[package]]
 name = "nzb-web"
 version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abe5b5e95fcf6c09f79a6a42df472e13151ca2c9396683ab1e17ef72724e71ed"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2719,6 +2715,7 @@ dependencies = [
  "tracing-appender",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

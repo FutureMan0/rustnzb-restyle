@@ -5,7 +5,7 @@ import { MatBottomSheetRef, MAT_BOTTOM_SHEET_DATA, MatBottomSheetModule } from '
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { Observable, finalize, switchMap, timer } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
-import { NzbJob, QueueResponse } from '../../core/models/queue.model';
+import { NzbJob } from '../../core/models/queue.model';
 
 export interface QueueJobSheetData {
   job: NzbJob;
@@ -442,20 +442,11 @@ export class QueueJobSheetComponent {
     timer(0, 2000)
       .pipe(
         takeUntilDestroyed(this.destroyRef),
-        switchMap(() => this.api.get<QueueResponse>('/queue')),
+        switchMap(() => this.api.get<NzbJob>(`/queue/${this.data.job.id}`)),
       )
       .subscribe({
-        next: (r) => {
-          const j = r.jobs.find((x) => x.id === this.data.job.id);
-          if (j) {
-            this.job.set(j);
-            this.total.set(r.jobs.length);
-            this.queueIndex.set(r.jobs.findIndex((x) => x.id === j.id));
-          } else {
-            this.ref.dismiss();
-          }
-        },
-        error: () => {},
+        next: (j) => this.job.set(j),
+        error: () => this.ref.dismiss(),
       });
   }
 

@@ -262,14 +262,26 @@ impl RssMonitor {
 
             info!(feed = %feed.name, title = %p.title, url = %url, "Auto-downloading RSS item");
 
+            // Reserve the item before enqueue so a crash/retry cannot enqueue
+            // the same RSS GUID twice. Manual download remains available via
+            // the stored item if the remote NZB fetch itself fails.
+            if let Err(e) = self
+                .queue_manager
+                .rss_item_mark_downloaded(&p.item.id, category.as_deref())
+            {
+                warn!(
+                    title = %p.title,
+                    error = %e,
+                    "Failed to reserve RSS item for auto-download"
+                );
+                continue;
+            }
+
             match self
                 .fetch_and_enqueue(client, url, &p.title, feed, category.as_deref(), priority)
                 .await
             {
                 Ok(()) => {
-                    let _ = self
-                        .queue_manager
-                        .rss_item_mark_downloaded(&p.item.id, category.as_deref());
                     info!(title = %p.title, "RSS item enqueued successfully");
                 }
                 Err(e) => {

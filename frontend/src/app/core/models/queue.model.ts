@@ -31,6 +31,10 @@ export interface QueueResponse {
   total: number;
   speed_bps: number;
   paused: boolean;
+  queue_size?: number;
+  disk_free_bytes?: number;
+  min_free_space_bytes?: number;
+  pause_remaining_secs?: number | null;
 }
 
 export interface StatusResponse {

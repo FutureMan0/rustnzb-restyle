@@ -367,7 +367,7 @@ export class App implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.authenticated.set(this.authService.isLoggedIn());
     this.pollStatus();
-    this.pollTimer = setInterval(() => this.pollStatus(), 2000);
+    this.pollTimer = setInterval(() => this.pollStatus(), 5000);
     this.router.events.pipe(filter(e => e instanceof NavigationEnd)).subscribe(() => this.setPageTitle());
     this.setPageTitle();
   }

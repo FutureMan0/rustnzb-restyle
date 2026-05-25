@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = []
-exclude = ["benchnzb", "desktop"]
+exclude = ["benchnzb", "desktop", "patches/nzb-web-0.4.13", "patches/nzb-postproc-0.2.5"]
 
 [workspace.package]
 version = "1.1.0"

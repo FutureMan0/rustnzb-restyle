@@ -305,11 +305,10 @@ pub async fn h_header_mark_read(
         .with_db(|db| {
             let mut marked = 0u64;
             for id in &input.header_ids {
-                if db.header_mark_read(*id).is_ok() {
-                    marked += 1;
-                }
+                db.header_mark_read(*id)?;
+                marked += 1;
             }
-            marked
+            Ok::<u64, nzb_web::nzb_core::NzbError>(marked)
         })
         .map_err(ApiError::from)?;
     Ok(Json(serde_json::json!({ "marked": count })))

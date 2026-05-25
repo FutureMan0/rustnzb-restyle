@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "nzb-web"
-version = "0.4.13"
+version = "0.4.15"
 build = false
 autolib = false
 autobins = false

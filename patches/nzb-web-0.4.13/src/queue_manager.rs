@@ -19,7 +19,7 @@ use crate::nzb_core::config::{CategoryConfig, ServerConfig};
 use crate::nzb_core::db::Database;
 use crate::nzb_core::models::*;
 use crate::nzb_core::nzb_parser;
-use nzb_postproc::{PostProcConfig, parse_rar_volume, run_pipeline};
+use nzb_postproc::{PostProcConfig, run_pipeline};
 
 use crate::direct_unpack::DirectUnpacker;
 use crate::log_buffer::LogBuffer;
@@ -112,6 +112,31 @@ pub struct ServerStatsData {
     pub week_fail: u64,
     pub month_fail: u64,
     pub last_active: Option<String>,
+}
+
+/// Lightweight queue-row shape used by list endpoints.
+///
+/// This intentionally omits `files[].articles[]` so high-frequency UI polls do
+/// not clone and serialize every article in large NZBs.
+#[derive(Serialize, Clone, Debug)]
+pub struct QueueJobSummary {
+    pub id: String,
+    pub name: String,
+    pub category: String,
+    pub status: JobStatus,
+    pub priority: Priority,
+    pub total_bytes: u64,
+    pub downloaded_bytes: u64,
+    pub file_count: usize,
+    pub files_completed: usize,
+    pub article_count: usize,
+    pub articles_downloaded: usize,
+    pub articles_failed: usize,
+    pub added_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub speed_bps: u64,
+    pub error_message: Option<String>,
+    pub server_stats: Vec<ServerArticleStats>,
 }
 
 /// Accumulate per-server stats into daily buckets stored in the settings table.
@@ -446,6 +471,68 @@ struct JobState {
     direct_unpacker: Option<DirectUnpacker>,
     /// Hopeless job tracker (None until download starts).
     hopeless_tracker: Option<HopelessTracker>,
+    /// file_id -> files index for hot-path progress updates.
+    file_index: HashMap<String, usize>,
+    /// file_id -> segment_number -> article index for hot-path progress updates.
+    article_index: HashMap<String, HashMap<u32, usize>>,
+}
+
+impl JobState {
+    fn new(job: NzbJob, nzb_data: Option<Vec<u8>>) -> Self {
+        let (file_index, article_index) = build_job_indexes(&job);
+        Self {
+            job,
+            progress_handle: None,
+            speed: Arc::new(SpeedTracker::new()),
+            nzb_data,
+            direct_unpacker: None,
+            hopeless_tracker: None,
+            file_index,
+            article_index,
+        }
+    }
+
+    fn rebuild_indexes(&mut self) {
+        (self.file_index, self.article_index) = build_job_indexes(&self.job);
+    }
+}
+
+fn build_job_indexes(
+    job: &NzbJob,
+) -> (HashMap<String, usize>, HashMap<String, HashMap<u32, usize>>) {
+    let mut file_index = HashMap::with_capacity(job.files.len());
+    let mut article_index = HashMap::with_capacity(job.files.len());
+    for (file_idx, file) in job.files.iter().enumerate() {
+        file_index.insert(file.id.clone(), file_idx);
+        let mut segments = HashMap::with_capacity(file.articles.len());
+        for (article_idx, article) in file.articles.iter().enumerate() {
+            segments.insert(article.segment_number, article_idx);
+        }
+        article_index.insert(file.id.clone(), segments);
+    }
+    (file_index, article_index)
+}
+
+fn queue_job_summary(state: &JobState) -> QueueJobSummary {
+    QueueJobSummary {
+        id: state.job.id.clone(),
+        name: state.job.name.clone(),
+        category: state.job.category.clone(),
+        status: state.job.status,
+        priority: state.job.priority,
+        total_bytes: state.job.total_bytes,
+        downloaded_bytes: state.job.downloaded_bytes,
+        file_count: state.job.file_count,
+        files_completed: state.job.files_completed,
+        article_count: state.job.article_count,
+        articles_downloaded: state.job.articles_downloaded,
+        articles_failed: state.job.articles_failed,
+        added_at: state.job.added_at,
+        completed_at: state.job.completed_at,
+        speed_bps: state.speed.bps(),
+        error_message: state.job.error_message.clone(),
+        server_stats: state.job.server_stats.clone(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +559,8 @@ pub struct QueueManager {
     job_order: Mutex<Vec<String>>,
     /// Server configurations.
     servers: Arc<Mutex<Vec<ServerConfig>>>,
+    /// Server ID -> display name cache for progress updates.
+    server_names: Mutex<HashMap<String, String>>,
     /// Whether all downloads are globally paused.
     globally_paused: AtomicBool,
     /// Global speed tracker.
@@ -495,8 +584,6 @@ pub struct QueueManager {
     min_free_space: u64,
     /// Bandwidth limiter for throttling downloads.
     bandwidth: Arc<BandwidthLimiter>,
-    /// Whether direct unpack (RAR extraction during download) is enabled.
-    direct_unpack_enabled: AtomicBool,
     /// Abort downloads that cannot possibly complete.
     abort_hopeless: bool,
     /// Phase 6: maximum time a job may sit in `Downloading` without any
@@ -561,7 +648,7 @@ impl QueueManager {
         categories: Vec<CategoryConfig>,
         min_free_space: u64,
         speed_limit_bps: u64,
-        direct_unpack: bool,
+        _direct_unpack: bool,
         abort_hopeless: bool,
         early_failure_check: bool,
         required_completion_pct: f64,
@@ -592,6 +679,10 @@ impl QueueManager {
         // Share the server list Arc between QueueManager and the news
         // engine so `update_servers` → `reconcile_servers` is observable
         // inside the engine without an extra plumbing step.
+        let server_names = servers
+            .iter()
+            .map(|server| (server.id.clone(), server.name.clone()))
+            .collect();
         let servers_arc = Arc::new(Mutex::new(servers));
         let mut news_cfg = NewsEngineConfig::with_shared_servers(
             servers_arc.clone(),
@@ -607,6 +698,7 @@ impl QueueManager {
             jobs: Mutex::new(HashMap::new()),
             job_order: Mutex::new(Vec::new()),
             servers: servers_arc,
+            server_names: Mutex::new(server_names),
             globally_paused: AtomicBool::new(false),
             speed: SpeedTracker::new(),
             db: Mutex::new(db),
@@ -619,7 +711,6 @@ impl QueueManager {
             categories: Mutex::new(categories),
             min_free_space,
             bandwidth,
-            direct_unpack_enabled: AtomicBool::new(direct_unpack),
             conn_tracker,
             dispatch,
             abort_hopeless,
@@ -643,6 +734,14 @@ impl QueueManager {
     /// that transitions to `Completed` or `Failed`.
     pub fn subscribe_completions(&self) -> broadcast::Receiver<CompletedJobEvent> {
         self.completion_tx.subscribe()
+    }
+
+    fn server_name_for(&self, server_id: &str) -> String {
+        self.server_names
+            .lock()
+            .get(server_id)
+            .cloned()
+            .unwrap_or_else(|| server_id.to_string())
     }
 
     /// Get history retention limit (None = keep all).
@@ -844,7 +943,7 @@ impl QueueManager {
         // compare against) — proceed without dedup.
         let content_hash = compute_content_hash(&job);
         if let Some(hash) = content_hash {
-            let hashes = self.content_hashes.lock();
+            let mut hashes = self.content_hashes.lock();
             if let Some(existing_id) = hashes.get(&hash) {
                 let existing_id = existing_id.clone();
                 drop(hashes);
@@ -858,24 +957,39 @@ impl QueueManager {
                     "duplicate content: already queued as job {existing_id}"
                 )));
             }
+            hashes.insert(hash, job.id.clone());
         }
 
         // Ensure work directory exists
-        std::fs::create_dir_all(&job.work_dir)?;
-
-        // Persist to DB
-        {
-            let db = self.db.lock();
-            db.queue_insert(&job)?;
-            // Store raw NZB data if available
-            if let Some(ref data) = nzb_data {
-                let _ = db.queue_store_nzb_data(&job.id, data);
+        if let Err(e) = std::fs::create_dir_all(&job.work_dir) {
+            if let Some(hash) = content_hash {
+                self.content_hashes.lock().remove(&hash);
             }
+            return Err(e.into());
         }
 
-        // Reserve the hash now that the job is committed.
-        if let Some(hash) = content_hash {
-            self.content_hashes.lock().insert(hash, job.id.clone());
+        // Persist to DB
+        let persist_result = {
+            let db = self.db.lock();
+            let result = (|| -> crate::nzb_core::Result<()> {
+                db.queue_insert(&job)?;
+                // Store raw NZB data if available. Without this, restored jobs
+                // cannot rebuild article state for resume.
+                if let Some(ref data) = nzb_data {
+                    db.queue_store_nzb_data(&job.id, data)?;
+                }
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = db.queue_remove(&job.id);
+            }
+            result
+        };
+        if let Err(e) = persist_result {
+            if let Some(hash) = content_hash {
+                self.content_hashes.lock().remove(&hash);
+            }
+            return Err(e);
         }
 
         let job_id = job.id.clone();
@@ -890,14 +1004,7 @@ impl QueueManager {
         // If globally paused, add as paused
         if self.globally_paused.load(Ordering::Relaxed) {
             job.status = JobStatus::Paused;
-            let state = JobState {
-                job,
-                progress_handle: None,
-                speed: Arc::new(SpeedTracker::new()),
-                nzb_data,
-                direct_unpacker: None,
-                hopeless_tracker: None,
-            };
+            let state = JobState::new(job, nzb_data);
             self.jobs.lock().insert(job_id.clone(), state);
             self.job_order.lock().push(job_id);
             return Ok(());
@@ -906,14 +1013,7 @@ impl QueueManager {
         // Insert as Queued — start_next_queued will atomically claim a
         // download slot if one is available.
         job.status = JobStatus::Queued;
-        let state = JobState {
-            job,
-            progress_handle: None,
-            speed: Arc::new(SpeedTracker::new()),
-            nzb_data,
-            direct_unpacker: None,
-            hopeless_tracker: None,
-        };
+        let state = JobState::new(job, nzb_data);
         self.jobs.lock().insert(job_id.clone(), state);
         self.job_order.lock().push(job_id);
 
@@ -941,6 +1041,7 @@ impl QueueManager {
                     match nzb_parser::parse_nzb(&state.job.name, &data) {
                         Ok(parsed) => {
                             state.job.files = parsed.files;
+                            state.rebuild_indexes();
                             // Apply checkpoint if available
                             if let Some(cp_data) = db.queue_load_job_data(job_id).unwrap_or(None)
                                 && let Ok(checkpoint) =
@@ -1083,6 +1184,7 @@ impl QueueManager {
                 } => {
                     self.speed.record(decoded_bytes);
                     job_speed.record(decoded_bytes);
+                    let server_name = server_id.as_deref().map(|sid| self.server_name_for(sid));
 
                     // Update in-memory job state
                     {
@@ -1098,17 +1200,11 @@ impl QueueManager {
                                     ss.articles_downloaded += 1;
                                     ss.bytes_downloaded += decoded_bytes;
                                 } else {
-                                    // Find server name from config
-                                    let sname = self
-                                        .servers
-                                        .lock()
-                                        .iter()
-                                        .find(|s| s.id == *sid)
-                                        .map(|s| s.name.clone())
-                                        .unwrap_or_else(|| sid.clone());
                                     stats.push(ServerArticleStats {
                                         server_id: sid.clone(),
-                                        server_name: sname,
+                                        server_name: server_name
+                                            .clone()
+                                            .unwrap_or_else(|| sid.clone()),
                                         articles_downloaded: 1,
                                         articles_failed: 0,
                                         bytes_downloaded: decoded_bytes,
@@ -1116,31 +1212,38 @@ impl QueueManager {
                                 }
                             }
 
-                            let file_is_par2 = state
-                                .job
-                                .files
-                                .iter()
-                                .find(|f| f.id == file_id)
+                            let file_idx = state.file_index.get(&file_id).copied();
+                            let article_idx = state
+                                .article_index
+                                .get(&file_id)
+                                .and_then(|segments| segments.get(&segment_number))
+                                .copied();
+                            let file_is_par2 = file_idx
+                                .and_then(|idx| state.job.files.get(idx))
                                 .is_some_and(|f| f.is_par2);
                             if let Some(ref mut tracker) = state.hopeless_tracker {
                                 tracker.record_success(file_is_par2);
                             }
 
-                            for file in &mut state.job.files {
-                                if file.id == file_id {
+                            if let Some(file_idx) = file_idx {
+                                if let Some(file) = state.job.files.get_mut(file_idx) {
                                     file.bytes_downloaded += decoded_bytes;
-                                    for article in &mut file.articles {
-                                        if article.segment_number == segment_number {
-                                            article.downloaded = true;
-                                            article.data_size = Some(decoded_bytes);
-                                        }
+                                    if let Some(article_idx) = article_idx
+                                        && let Some(article) = file.articles.get_mut(article_idx)
+                                    {
+                                        article.downloaded = true;
+                                        article.data_size = Some(decoded_bytes);
                                     }
-                                    if file_complete && !file.assembled {
-                                        file.assembled = true;
+                                    let completed_filename =
+                                        (file_complete && !file.assembled).then(|| {
+                                            file.assembled = true;
+                                            file.filename.clone()
+                                        });
+                                    if let Some(filename) = completed_filename {
                                         state.job.files_completed += 1;
                                         info!(
                                             job_id = %job_id,
-                                            file = %file.filename,
+                                            file = %filename,
                                             completed = state.job.files_completed,
                                             total = state.job.file_count,
                                             "File assembly complete"
@@ -1155,7 +1258,6 @@ impl QueueManager {
                                         // download for overlapping I/O. Re-enable only after fixing
                                         // the -vp interactive prompt handling in direct_unpack.rs.
                                     }
-                                    break;
                                 }
                             }
                         }
@@ -1171,6 +1273,7 @@ impl QueueManager {
                     file_id, failure, ..
                 } => {
                     let _ = &failure.message; // forwarded into logs below
+                    let failure_server_name = self.server_name_for(&failure.server_id);
                     let should_abort = {
                         let mut jobs = self.jobs.lock();
                         if let Some(state) = jobs.get_mut(&job_id) {
@@ -1182,16 +1285,9 @@ impl QueueManager {
                             if let Some(ss) = stats.iter_mut().find(|s| s.server_id == *sid) {
                                 ss.articles_failed += 1;
                             } else {
-                                let sname = self
-                                    .servers
-                                    .lock()
-                                    .iter()
-                                    .find(|s| s.id == *sid)
-                                    .map(|s| s.name.clone())
-                                    .unwrap_or_else(|| sid.clone());
                                 stats.push(ServerArticleStats {
                                     server_id: sid.clone(),
-                                    server_name: sname,
+                                    server_name: failure_server_name.clone(),
                                     articles_downloaded: 0,
                                     articles_failed: 1,
                                     bytes_downloaded: 0,
@@ -1210,27 +1306,20 @@ impl QueueManager {
 
                             // Track failure in hopeless detector and check
                             // whether this job can still complete.
+                            let (file_is_par2, estimated_bytes) = state
+                                .file_index
+                                .get(&file_id)
+                                .and_then(|idx| state.job.files.get(*idx))
+                                .map(|f| {
+                                    let estimated = if f.articles.is_empty() {
+                                        0
+                                    } else {
+                                        f.bytes / f.articles.len() as u64
+                                    };
+                                    (f.is_par2, estimated)
+                                })
+                                .unwrap_or((false, 0));
                             if let Some(ref mut tracker) = state.hopeless_tracker {
-                                let file_is_par2 = state
-                                    .job
-                                    .files
-                                    .iter()
-                                    .find(|f| f.id == file_id)
-                                    .is_some_and(|f| f.is_par2);
-                                // Estimate article size from total file bytes / article count
-                                let estimated_bytes = state
-                                    .job
-                                    .files
-                                    .iter()
-                                    .find(|f| f.id == file_id)
-                                    .map(|f| {
-                                        if f.articles.is_empty() {
-                                            0
-                                        } else {
-                                            f.bytes / f.articles.len() as u64
-                                        }
-                                    })
-                                    .unwrap_or(0);
                                 tracker.record_failure(file_is_par2, estimated_bytes, failure.kind);
                                 // Observability: dump tracker state on every
                                 // failure so operators can see the ratio
@@ -1597,8 +1686,6 @@ impl QueueManager {
 
     /// Move a job's files to output and insert a history entry.
     fn move_to_history(&self, state: &mut JobState, stages: Vec<StageResult>) {
-        let move_start = Instant::now();
-
         let final_status = if state.job.status == JobStatus::Failed {
             // Already marked failed (by pipeline or download with pp disabled)
             JobStatus::Failed
@@ -1608,37 +1695,9 @@ impl QueueManager {
             JobStatus::Completed
         };
 
-        // Move files from work_dir to output_dir (if not already done by pipeline extract)
-        if final_status == JobStatus::Completed {
-            if let Err(e) = std::fs::create_dir_all(&state.job.output_dir) {
-                warn!(job_id = %state.job.id, "Failed to create output dir: {e}");
-            }
-            if let Ok(entries) = std::fs::read_dir(&state.job.work_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        let dest = state.job.output_dir.join(entry.file_name());
-                        if let Err(e) = std::fs::rename(&path, &dest) {
-                            if let Err(e2) = std::fs::copy(&path, &dest) {
-                                warn!(
-                                    job_id = %state.job.id,
-                                    file = %path.display(),
-                                    "Failed to move file: rename={e}, copy={e2}"
-                                );
-                            } else {
-                                let _ = std::fs::remove_file(&path);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        let file_move_secs = move_start.elapsed().as_secs_f64();
         info!(
             job_id = %state.job.id,
             final_status = %final_status,
-            file_move_secs = format!("{file_move_secs:.3}"),
             stage_count = stages.len(),
             "Moving job to history"
         );
@@ -1665,16 +1724,9 @@ impl QueueManager {
         let db = self.db.lock();
         if let Err(e) = db.history_insert(&history_entry) {
             error!(job_id = %state.job.id, "Failed to insert history: {e}");
+            return;
         }
         accumulate_server_stats(&db, &history_entry.server_stats);
-
-        // Notify any subscribers (e.g. DAV auto-send). Ignore if no listeners.
-        let _ = self.completion_tx.send(CompletedJobEvent {
-            id: history_entry.id.clone(),
-            name: history_entry.name.clone(),
-            category: history_entry.category.clone(),
-            status: final_status,
-        });
 
         // Capture and persist per-job logs from the ring buffer
         if let Some(ref log_buffer) = self.log_buffer {
@@ -1687,6 +1739,53 @@ impl QueueManager {
             }
         }
 
+        drop(db);
+
+        // Move files from work_dir to output_dir only after history is durable.
+        // This avoids a crash window where files are gone but the queue row
+        // remains the only persisted source of truth.
+        let move_start = Instant::now();
+        if final_status == JobStatus::Completed {
+            if let Err(e) = std::fs::create_dir_all(&state.job.output_dir) {
+                warn!(job_id = %state.job.id, "Failed to create output dir: {e}");
+            }
+            if let Ok(entries) = std::fs::read_dir(&state.job.work_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let dest = state.job.output_dir.join(entry.file_name());
+                        if let Err(e) = std::fs::rename(&path, &dest) {
+                            if let Err(e2) = std::fs::copy(&path, &dest) {
+                                warn!(
+                                    job_id = %state.job.id,
+                                    file = %path.display(),
+                                    "Failed to move file: rename={e}, copy={e2}"
+                                );
+                            } else {
+                                let _ = std::fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let file_move_secs = move_start.elapsed().as_secs_f64();
+        info!(
+            job_id = %state.job.id,
+            file_move_secs = format!("{file_move_secs:.3}"),
+            "Finished moving completed files"
+        );
+
+        // Notify any subscribers (e.g. DAV auto-send) after files are in their
+        // final location. Ignore if no listeners.
+        let _ = self.completion_tx.send(CompletedJobEvent {
+            id: history_entry.id.clone(),
+            name: history_entry.name.clone(),
+            category: history_entry.category.clone(),
+            status: final_status,
+        });
+
+        let db = self.db.lock();
         if let Err(e) = db.queue_remove(&state.job.id) {
             error!(job_id = %state.job.id, "Failed to remove from queue: {e}");
         }
@@ -1702,48 +1801,70 @@ impl QueueManager {
     /// Persist current job progress to the database, including article-level
     /// checkpoint data for resume support.
     fn persist_job_progress(&self, job_id: &str) {
-        let jobs = self.jobs.lock();
-        if let Some(state) = jobs.get(job_id) {
-            let db = self.db.lock();
-            if let Err(e) = db.queue_update_progress(
-                job_id,
-                state.job.status,
-                state.job.downloaded_bytes,
-                state.job.articles_downloaded,
-                state.job.articles_failed,
-                state.job.files_completed,
-            ) {
-                warn!(job_id = %job_id, "Failed to persist progress: {e}");
-            }
+        let Some((status, downloaded_bytes, articles_downloaded, articles_failed, files_completed, checkpoint_data)) =
+            self.job_progress_snapshot(job_id)
+        else {
+            return;
+        };
 
-            // Build and store checkpoint of downloaded article segments
-            let checkpoint = JobCheckpoint {
-                files: state
-                    .job
-                    .files
-                    .iter()
-                    .map(|f| {
-                        let downloaded_segments: Vec<u32> = f
-                            .articles
-                            .iter()
-                            .filter(|a| a.downloaded)
-                            .map(|a| a.segment_number)
-                            .collect();
-                        (f.id.clone(), downloaded_segments)
-                    })
-                    .collect(),
-                downloaded_bytes: state.job.downloaded_bytes,
-                articles_downloaded: state.job.articles_downloaded,
-                articles_failed: state.job.articles_failed,
-                files_completed: state.job.files_completed,
-            };
-
-            if let Ok(data) = serde_json::to_vec(&checkpoint)
-                && let Err(e) = db.queue_store_job_data(job_id, &data)
-            {
-                warn!(job_id = %job_id, "Failed to persist checkpoint: {e}");
-            }
+        let db = self.db.lock();
+        if let Err(e) = db.queue_update_progress(
+            job_id,
+            status,
+            downloaded_bytes,
+            articles_downloaded,
+            articles_failed,
+            files_completed,
+        ) {
+            warn!(job_id = %job_id, "Failed to persist progress: {e}");
         }
+
+        if let Err(e) = db.queue_store_job_data(job_id, &checkpoint_data) {
+            warn!(job_id = %job_id, "Failed to persist checkpoint: {e}");
+        }
+    }
+
+    fn job_progress_snapshot(
+        &self,
+        job_id: &str,
+    ) -> Option<(JobStatus, u64, usize, usize, usize, Vec<u8>)> {
+        let jobs = self.jobs.lock();
+        let state = jobs.get(job_id)?;
+        let checkpoint = JobCheckpoint {
+            files: state
+                .job
+                .files
+                .iter()
+                .map(|f| {
+                    let downloaded_segments: Vec<u32> = f
+                        .articles
+                        .iter()
+                        .filter(|a| a.downloaded)
+                        .map(|a| a.segment_number)
+                        .collect();
+                    (f.id.clone(), downloaded_segments)
+                })
+                .collect(),
+            downloaded_bytes: state.job.downloaded_bytes,
+            articles_downloaded: state.job.articles_downloaded,
+            articles_failed: state.job.articles_failed,
+            files_completed: state.job.files_completed,
+        };
+        let checkpoint_data = match serde_json::to_vec(&checkpoint) {
+            Ok(data) => data,
+            Err(e) => {
+                warn!(job_id = %job_id, "Failed to serialize checkpoint: {e}");
+                return None;
+            }
+        };
+        Some((
+            state.job.status,
+            state.job.downloaded_bytes,
+            state.job.articles_downloaded,
+            state.job.articles_failed,
+            state.job.files_completed,
+            checkpoint_data,
+        ))
     }
 
     // -----------------------------------------------------------------------
@@ -2188,6 +2309,10 @@ impl QueueManager {
             self.conn_tracker
                 .set_limit(&server.id, &server.name, server.connections as usize);
         }
+        *self.server_names.lock() = servers
+            .iter()
+            .map(|server| (server.id.clone(), server.name.clone()))
+            .collect();
         *self.servers.lock() = servers;
 
         // Reconcile the worker pool to match the new server list (spawns or
@@ -2259,6 +2384,19 @@ impl QueueManager {
         result
     }
 
+    /// Get lightweight queue rows without cloning per-article file details.
+    pub fn get_job_summaries(&self) -> Vec<QueueJobSummary> {
+        let jobs = self.jobs.lock();
+        let order = self.job_order.lock();
+        let mut result = Vec::with_capacity(order.len());
+        for id in order.iter() {
+            if let Some(state) = jobs.get(id) {
+                result.push(queue_job_summary(state));
+            }
+        }
+        result
+    }
+
     /// Get a single job by ID (with files included).
     pub fn get_job(&self, job_id: &str) -> Option<NzbJob> {
         let jobs = self.jobs.lock();
@@ -2267,6 +2405,12 @@ impl QueueManager {
             job.speed_bps = state.speed.bps();
             job
         })
+    }
+
+    /// Get a single lightweight queue row by ID.
+    pub fn get_job_summary(&self, job_id: &str) -> Option<QueueJobSummary> {
+        let jobs = self.jobs.lock();
+        jobs.get(job_id).map(queue_job_summary)
     }
 
     /// Get the current download speed in bytes per second.
@@ -2647,14 +2791,7 @@ impl QueueManager {
                 self.content_hashes.lock().insert(hash, job_id.clone());
             }
 
-            let state = JobState {
-                job,
-                progress_handle: None,
-                speed: Arc::new(SpeedTracker::new()),
-                nzb_data,
-                direct_unpacker: None,
-                hopeless_tracker: None,
-            };
+            let state = JobState::new(job, nzb_data);
             self.jobs.lock().insert(job_id.clone(), state);
             self.job_order.lock().push(job_id);
         }
@@ -2708,22 +2845,10 @@ impl QueueManager {
             handle.abort();
         }
 
-        // 4. Persist final state for all jobs to DB
-        {
-            let jobs = self.jobs.lock();
-            let db = self.db.lock();
-            for (id, state) in jobs.iter() {
-                if let Err(e) = db.queue_update_progress(
-                    id,
-                    state.job.status,
-                    state.job.downloaded_bytes,
-                    state.job.articles_downloaded,
-                    state.job.articles_failed,
-                    state.job.files_completed,
-                ) {
-                    error!(job_id = %id, error = %e, "Failed to persist job state on shutdown");
-                }
-            }
+        // 5. Persist final state and article checkpoints for all jobs to DB.
+        let job_ids: Vec<String> = self.jobs.lock().keys().cloned().collect();
+        for id in job_ids {
+            self.persist_job_progress(&id);
         }
 
         info!("Queue manager shutdown complete");

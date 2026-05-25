@@ -200,7 +200,15 @@ pub async fn extract_zip(zip_file: &Path, output_dir: &Path) -> anyhow::Result<U
 
         for i in 0..archive.len() {
             let mut entry = archive.by_index(i)?;
-            let outpath = out_path.join(entry.mangled_name());
+            let Some(enclosed_name) = entry.enclosed_name().map(|p| p.to_owned()) else {
+                warn!(
+                    archive = %zip_path.display(),
+                    entry = entry.name(),
+                    "Skipping unsafe ZIP entry path"
+                );
+                continue;
+            };
+            let outpath = out_path.join(enclosed_name);
 
             if entry.is_dir() {
                 std::fs::create_dir_all(&outpath)?;

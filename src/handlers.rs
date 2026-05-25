@@ -24,7 +24,11 @@ async fn validate_outbound_url(url: &str) -> Result<(), String> {
     // Only allow http and https schemes
     match parsed.scheme() {
         "http" | "https" => {}
-        other => return Err(format!("Unsupported URL scheme: '{other}'. Only http and https are allowed.")),
+        other => {
+            return Err(format!(
+                "Unsupported URL scheme: '{other}'. Only http and https are allowed."
+            ));
+        }
     }
 
     // Resolve the host to an IP address and check against private ranges
@@ -32,7 +36,9 @@ async fn validate_outbound_url(url: &str) -> Result<(), String> {
         // First check if it's already an IP literal
         if let Ok(ip) = host.parse::<IpAddr>() {
             if is_private_or_reserved(&ip) {
-                return Err(format!("URL resolves to a private/reserved address ({ip}). Not allowed for security reasons."));
+                return Err(format!(
+                    "URL resolves to a private/reserved address ({ip}). Not allowed for security reasons."
+                ));
             }
         } else {
             // It's a hostname — resolve via DNS and check ALL resulting addresses.
@@ -53,7 +59,9 @@ async fn validate_outbound_url(url: &str) -> Result<(), String> {
             }
 
             // Perform actual DNS resolution
-            let port = parsed.port().unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
+            let port = parsed
+                .port()
+                .unwrap_or(if parsed.scheme() == "https" { 443 } else { 80 });
             let lookup_target = format!("{host}:{port}");
             match tokio::net::lookup_host(&lookup_target).await {
                 Ok(addrs) => {
@@ -68,9 +76,7 @@ async fn validate_outbound_url(url: &str) -> Result<(), String> {
                     }
                 }
                 Err(e) => {
-                    return Err(format!(
-                        "Could not resolve hostname '{host}': {e}"
-                    ));
+                    return Err(format!("Could not resolve hostname '{host}': {e}"));
                 }
             }
         }
@@ -92,51 +98,91 @@ fn is_private_or_reserved(ip: &IpAddr) -> bool {
 
 fn is_private_v4(ip: &Ipv4Addr) -> bool {
     // Loopback: 127.0.0.0/8
-    if ip.is_loopback() { return true; }
+    if ip.is_loopback() {
+        return true;
+    }
     // Private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
-    if ip.is_private() { return true; }
+    if ip.is_private() {
+        return true;
+    }
     // Link-local: 169.254.0.0/16 (includes cloud metadata endpoints)
-    if ip.is_link_local() { return true; }
+    if ip.is_link_local() {
+        return true;
+    }
     // Broadcast: 255.255.255.255
-    if ip.is_broadcast() { return true; }
+    if ip.is_broadcast() {
+        return true;
+    }
     // Unspecified: 0.0.0.0
-    if ip.is_unspecified() { return true; }
+    if ip.is_unspecified() {
+        return true;
+    }
     // IETF protocol assignments: 192.0.0.0/24
     let octets = ip.octets();
-    if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 { return true; }
+    if octets[0] == 192 && octets[1] == 0 && octets[2] == 0 {
+        return true;
+    }
     // Documentation: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
-    if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 { return true; }
-    if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 { return true; }
-    if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 { return true; }
+    if octets[0] == 192 && octets[1] == 0 && octets[2] == 2 {
+        return true;
+    }
+    if octets[0] == 198 && octets[1] == 51 && octets[2] == 100 {
+        return true;
+    }
+    if octets[0] == 203 && octets[1] == 0 && octets[2] == 113 {
+        return true;
+    }
     // Benchmarking: 198.18.0.0/15
-    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) { return true; }
+    if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+        return true;
+    }
     // Multicast: 224.0.0.0/4
-    if ip.is_multicast() { return true; }
+    if ip.is_multicast() {
+        return true;
+    }
     // Future/Reserved: 240.0.0.0/4
-    if octets[0] >= 240 { return true; }
+    if octets[0] >= 240 {
+        return true;
+    }
     // 100.64.0.0/10 — Carrier-grade NAT (RFC 6598)
-    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 { return true; }
+    if octets[0] == 100 && (octets[1] & 0b1100_0000) == 0b0100_0000 {
+        return true;
+    }
     false
 }
 
 fn is_private_v6(ip: &Ipv6Addr) -> bool {
-    if ip.is_loopback() { return true; }
-    if ip.is_unspecified() { return true; }
+    if ip.is_loopback() {
+        return true;
+    }
+    if ip.is_unspecified() {
+        return true;
+    }
     // IPv4-mapped IPv6 addresses (::ffff:a.b.c.d) — check the embedded IPv4
     if let Some(v4) = ip.to_ipv4_mapped() {
         return is_private_v4(&v4);
     }
     // Link-local: fe80::/10
     let segments = ip.segments();
-    if (segments[0] & 0xffc0) == 0xfe80 { return true; }
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
     // Unique local: fc00::/7
-    if (segments[0] & 0xfe00) == 0xfc00 { return true; }
+    if (segments[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
     // Multicast: ff00::/8
-    if ip.is_multicast() { return true; }
+    if ip.is_multicast() {
+        return true;
+    }
     // Documentation: 2001:db8::/32
-    if segments[0] == 0x2001 && segments[1] == 0x0db8 { return true; }
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return true;
+    }
     // ORCHIDv2: 2001:20::/28
-    if segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020 { return true; }
+    if segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020 {
+        return true;
+    }
     false
 }
 
@@ -147,6 +193,7 @@ use nzb_web::nzb_core::models::*;
 use nzb_web::nzb_core::nzb_parser;
 use nzb_web::nzb_core::sabnzbd_import;
 
+use nzb_web::QueueJobSummary;
 use nzb_web::error::ApiError;
 use nzb_web::log_buffer::LogEntry;
 use nzb_web::state::AppState;
@@ -215,7 +262,11 @@ fn priority_rank(priority: Priority) -> u8 {
     }
 }
 
-fn should_preempt_for_priority_change(state: &AppState, job_id: &str, new_priority: Priority) -> bool {
+fn should_preempt_for_priority_change(
+    state: &AppState,
+    job_id: &str,
+    new_priority: Priority,
+) -> bool {
     let Some(existing) = state
         .queue_manager
         .get_jobs()
@@ -285,7 +336,7 @@ fn apply_priority_preemption(state: &AppState, target_id: &str, target_priority:
     }
 }
 
-fn normalize_queue_job_for_response(job: &mut NzbJob) {
+fn normalize_queue_job_for_response(job: &mut QueueJobSummary) {
     if job.total_bytes > 0 && job.downloaded_bytes >= job.total_bytes {
         if matches!(job.status, JobStatus::Downloading | JobStatus::Queued) {
             job.status = JobStatus::Completed;
@@ -297,7 +348,10 @@ fn normalize_queue_job_for_response(job: &mut NzbJob) {
     }
 }
 
-fn normalize_downloading_slots_for_response(jobs: &mut [NzbJob], max_active_downloads: usize) {
+fn normalize_downloading_slots_for_response(
+    jobs: &mut [QueueJobSummary],
+    max_active_downloads: usize,
+) {
     if max_active_downloads == 0 {
         for job in jobs.iter_mut() {
             if job.status == JobStatus::Downloading {
@@ -345,10 +399,14 @@ fn normalize_downloading_slots_for_response(jobs: &mut [NzbJob], max_active_down
 
 #[derive(Serialize)]
 pub struct QueueResponse {
-    pub jobs: Vec<NzbJob>,
+    pub jobs: Vec<QueueJobSummary>,
     pub total: usize,
     pub speed_bps: u64,
     pub paused: bool,
+    pub queue_size: usize,
+    pub disk_free_bytes: u64,
+    pub min_free_space_bytes: u64,
+    pub pause_remaining_secs: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -437,7 +495,7 @@ pub async fn h_queue_list(
     Query(q): Query<QueueQuery>,
 ) -> Result<Json<QueueResponse>, ApiError> {
     let qm = &state.queue_manager;
-    let mut all_jobs = qm.get_jobs();
+    let mut all_jobs = qm.get_job_summaries();
     for job in &mut all_jobs {
         normalize_queue_job_for_response(job);
     }
@@ -446,6 +504,8 @@ pub async fn h_queue_list(
     let total = all_jobs.len();
     let speed_bps = qm.get_speed();
     let paused = qm.is_paused();
+    let config = state.config();
+    let disk_free_bytes = get_disk_space_free(&config.general.complete_dir);
 
     // Apply pagination (default: first 100 jobs)
     let offset = q.offset.unwrap_or(0);
@@ -457,7 +517,24 @@ pub async fn h_queue_list(
         total,
         speed_bps,
         paused,
+        queue_size: total,
+        disk_free_bytes,
+        min_free_space_bytes: qm.min_free_space(),
+        pause_remaining_secs: qm.pause_remaining_secs(),
     }))
+}
+
+/// GET /api/queue/{id} -- Return one lightweight queue job.
+pub async fn h_queue_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<QueueJobSummary>, ApiError> {
+    let mut job = state
+        .queue_manager
+        .get_job_summary(&id)
+        .ok_or_else(|| ApiError::from(anyhow::anyhow!("Job not found")))?;
+    normalize_queue_job_for_response(&mut job);
+    Ok(Json(job))
 }
 
 /// Extract NZB files from an uploaded file. If it's an archive (zip, gz),
@@ -975,7 +1052,16 @@ pub async fn h_logs(
 pub async fn h_config_get(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<nzb_web::nzb_core::config::AppConfig>, ApiError> {
-    Ok(Json((*state.config()).clone()))
+    let mut config = (*state.config()).clone();
+    if config.general.api_key.is_some() {
+        config.general.api_key = Some("********".to_string());
+    }
+    for server in &mut config.servers {
+        if server.password.is_some() {
+            server.password = Some("********".to_string());
+        }
+    }
+    Ok(Json(config))
 }
 
 /// GET /api/config/servers -- List configured servers.

@@ -73,10 +73,59 @@ fn serve_embedded_file(path: &str) -> Response {
     }
 }
 
+fn setup_allowed_without_credentials(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/status"
+            | "/api/setup/status"
+            | "/api/setup/apply"
+            | "/api/setup/import-sabnzbd"
+            | "/api/setup/import-sabnzbd-api"
+    )
+}
+
+fn swagger_enabled() -> bool {
+    std::env::var("RUSTNZB_ENABLE_SWAGGER")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+async fn security_headers(request: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::HeaderName::from_static("x-content-type-options"),
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("x-frame-options"),
+        header::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("referrer-policy"),
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::HeaderName::from_static("permissions-policy"),
+        header::HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
+    );
+    response
+}
+
 /// Build the axum Router with all API routes.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::default()
-        .allow_origin(AllowOrigin::any())
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let Ok(origin) = origin.to_str() else {
+                return false;
+            };
+            origin.starts_with("http://localhost")
+                || origin.starts_with("http://127.0.0.1")
+                || origin.starts_with("http://[::1]")
+                || origin.starts_with("https://localhost")
+                || origin.starts_with("https://127.0.0.1")
+                || origin.starts_with("https://[::1]")
+        }))
         .allow_headers(AllowHeaders::any());
 
     // Auth endpoints (no auth middleware on these)
@@ -125,7 +174,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             put(handlers::h_queue_change_category),
         )
         .route("/queue/bulk", post(handlers::h_queue_bulk_action))
-        .route("/queue/{id}", delete(handlers::h_queue_delete))
+        .route(
+            "/queue/{id}",
+            get(handlers::h_queue_get).delete(handlers::h_queue_delete),
+        )
         // History
         .route("/history", get(handlers::h_history_list))
         .route("/history/{id}", delete(handlers::h_history_delete))
@@ -272,7 +324,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
 
                 // If no credentials configured, allow all requests (setup_required state)
                 if !credential_store.has_credentials() {
-                    return Ok(next.run(request).await);
+                    if setup_allowed_without_credentials(request.uri().path()) {
+                        return Ok(next.run(request).await);
+                    }
+                    return Err(ApiError::unauthorized());
                 }
 
                 // Try Bearer token first
@@ -316,7 +371,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         },
     );
 
-    Router::new()
+    let router = Router::new()
         // Root serves index.html
         .route("/", get(h_root))
         // Health check — no auth (Docker HEALTHCHECK)
@@ -330,10 +385,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // SPA fallback — serve Angular for all unmatched routes
         .fallback(h_spa_fallback)
         .layer(DefaultBodyLimit::max(200 * 1024 * 1024)) // 200 MB for multi-file NZB uploads
+        .layer(axum::middleware::from_fn(security_headers))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
-        .with_state(state)
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+        .with_state(state);
+
+    if swagger_enabled() {
+        router.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
+    } else {
+        router
+    }
 }
 
 /// Start the HTTP server with a default router.

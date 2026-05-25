@@ -39,14 +39,18 @@ fn validate_api_key(
     provided: Option<&str>,
 ) -> Result<(), Json<serde_json::Value>> {
     let config = state.config();
-    if let Some(ref configured_key) = config.general.api_key {
-        let provided_key = provided.unwrap_or("");
-        if !crate::auth::constant_time_eq(provided_key.as_bytes(), configured_key.as_bytes()) {
-            return Err(Json(serde_json::json!({
-                "status": false,
-                "error": "API Key Incorrect"
-            })));
-        }
+    let Some(ref configured_key) = config.general.api_key else {
+        return Err(Json(serde_json::json!({
+            "status": false,
+            "error": "API Key Required"
+        })));
+    };
+    let provided_key = provided.unwrap_or("");
+    if !crate::auth::constant_time_eq(provided_key.as_bytes(), configured_key.as_bytes()) {
+        return Err(Json(serde_json::json!({
+            "status": false,
+            "error": "API Key Incorrect"
+        })));
     }
     Ok(())
 }

@@ -1199,7 +1199,7 @@ export class QueueViewComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadAll();
-    this.pollTimer = setInterval(() => this.loadQueue(), 2000);
+    this.pollTimer = setInterval(() => this.loadQueue(), 3000);
   }
 
   ngOnDestroy(): void {
@@ -1358,6 +1358,13 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     }
     this.remainingBytes.set(r.jobs.reduce((sum, j) => sum + this.remainingForJob(j), 0));
     const sp = this.normalizeNonNegative(r.speed_bps);
+    this.status.set({
+      ...(this.status() ?? {}),
+      speed_bps: sp,
+      queue_size: r.queue_size ?? r.total,
+      disk_free_bytes: r.disk_free_bytes ?? this.status()?.disk_free_bytes ?? 0,
+      paused: r.paused,
+    } as StatusResponse);
     this.speedHistory.set([...this.speedHistory(), sp].slice(-30));
     if (sp !== this.lastQueueSpeedBps) {
       this.lastQueueSpeedBps = sp;
@@ -1374,10 +1381,6 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   loadQueue(): void {
     this.api.get<QueueResponse>('/queue').subscribe({
       next: (r) => this.applyQueueResponse(r),
-      error: () => {},
-    });
-    this.api.get<StatusResponse>('/status').subscribe({
-      next: s => this.status.set(s),
       error: () => {},
     });
   }
