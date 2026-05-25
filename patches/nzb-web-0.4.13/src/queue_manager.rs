@@ -2245,7 +2245,7 @@ impl QueueManager {
         id: &str,
         position: usize,
     ) -> crate::nzb_core::Result<()> {
-        let updates: Vec<(String, Priority)> = {
+        let (updates, resumed_target) = {
             let mut order = self.job_order.lock();
             let current_pos = order
                 .iter()
@@ -2257,6 +2257,7 @@ impl QueueManager {
 
             let mut jobs = self.jobs.lock();
             let mut updates = Vec::with_capacity(order.len());
+            let mut resumed_target: Option<(JobStatus, u64, usize, usize, usize)> = None;
             for (idx, job_id) in order.iter().enumerate() {
                 let priority = priority_for_position(idx);
                 if let Some(state) = jobs.get_mut(job_id)
@@ -2266,7 +2267,21 @@ impl QueueManager {
                     updates.push((job_id.clone(), priority));
                 }
             }
-            updates
+            if !self.globally_paused.load(Ordering::Relaxed)
+                && let Some(state) = jobs.get_mut(id)
+                && state.job.status == JobStatus::Paused
+            {
+                state.job.status = JobStatus::Queued;
+                state.job.error_message = None;
+                resumed_target = Some((
+                    state.job.status,
+                    state.job.downloaded_bytes,
+                    state.job.articles_downloaded,
+                    state.job.articles_failed,
+                    state.job.files_completed,
+                ));
+            }
+            (updates, resumed_target)
         };
 
         if !updates.is_empty() {
@@ -2274,6 +2289,30 @@ impl QueueManager {
             for (job_id, priority) in &updates {
                 db.queue_update_priority(job_id, *priority as i32)?;
             }
+            if let Some((status, downloaded_bytes, articles_downloaded, articles_failed, files_completed)) =
+                resumed_target
+            {
+                db.queue_update_progress(
+                    id,
+                    status,
+                    downloaded_bytes,
+                    articles_downloaded,
+                    articles_failed,
+                    files_completed,
+                )?;
+            }
+        } else if let Some((status, downloaded_bytes, articles_downloaded, articles_failed, files_completed)) =
+            resumed_target
+        {
+            let db = self.db.lock();
+            db.queue_update_progress(
+                id,
+                status,
+                downloaded_bytes,
+                articles_downloaded,
+                articles_failed,
+                files_completed,
+            )?;
         }
 
         self.preempt_if_needed();

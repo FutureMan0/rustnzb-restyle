@@ -449,7 +449,7 @@ async fn unreachable_primary_does_not_hang_backup() {
 }
 
 #[tokio::test]
-async fn moving_queued_job_to_top_preempts_lower_priority_download() {
+async fn moving_paused_job_to_top_resumes_and_preempts_lower_priority_download() {
     let (xml_a, mut yenc_a, _mids_a) = make_fixture("preempt-a", 16);
     let (xml_b, yenc_b, _mids_b) = make_fixture("preempt-b", 1);
     yenc_a.extend(yenc_b);
@@ -484,6 +484,19 @@ async fn moving_queued_job_to_top_preempts_lower_priority_download() {
         })
         .await;
     assert!(ready, "test setup did not reach downloading+queued state");
+
+    engine
+        .queue_manager
+        .pause_job(&second_id)
+        .expect("pause queued job");
+    let paused = engine
+        .wait_for(Duration::from_secs(5), |snap| {
+            let first = snap.job(&first_id).map(|j| j.status);
+            let second = snap.job(&second_id).map(|j| j.status);
+            first == Some(JobStatus::Downloading) && second == Some(JobStatus::Paused)
+        })
+        .await;
+    assert!(paused, "second job should be paused before move");
 
     engine
         .queue_manager
