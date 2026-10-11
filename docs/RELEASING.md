@@ -76,9 +76,21 @@ each crate's `repository` field). This monorepo is the head:
   tree.
 - **Drift is gated.** The scheduled `crate-drift` job
   (`.github/workflows/quality-schedule.yml`, via `ci/tasks/crate-drift`) fails
-  when any standalone repo's `src/` or package version differs from the
+  when any standalone repo's tree or package version differs from the
   monorepo. A failure means a crate changed here without a sync; run
   `ci/tasks/sync-crate <name>`, merge, and publish from the tag.
+- **A sync never deletes standalone-only files.** `ci/sync-preserve.txt` lists
+  paths the standalone repos own (CI workflows, license, renovate). Both the
+  sync and the drift check leave those alone, unless the monorepo has started
+  shipping the same path, in which case the monorepo copy wins. Everything else
+  in the standalone tree — including a workspace member such as `nzb-decode`'s
+  `ffi/` — must live in the monorepo, or the next sync will not carry it and
+  drift will fail.
+- **A sync refuses over unported work.** `sync-crate` exits 3 when a commit
+  since the last `sync: <crate> from rustnzb monorepo` commit on the standalone
+  `main` changes a path the monorepo does not export byte-for-byte. Port that
+  change into the monorepo first. A commit whose every non-preserved path
+  already matches the export is treated as absorbed.
 
 ## Rollback
 
