@@ -3,16 +3,27 @@
 /data
 /downloads
 config.toml
+!.cargo/
+!.cargo/config.toml
 DEPLOY.local.md
 .env
 tests/sonarr-e2e/data/
+apps/rustnzb/tests/sonarr-e2e/data/
 e2e/node_modules/
 e2e/test-data/
 e2e/test-results/
+e2e/playwright-report/
+e2e/auth-state.json
+e2e/mock-auth-state.json
+/.ci-cache/
+/.ci-output/
+/.ci-artifacts/
+/tempmigration.md
+/testuplift.md
+/status.md
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/target/
 
 # Codesight
 .codesight/
-
-# Local dev files
-.cgcignore
-mockups/

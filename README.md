@@ -1,62 +1,56 @@
 # rustnzb
 
-**A Modern Usenet Binary Downloader, Rewritten From the Ground Up in Rust**
+**A modern Usenet downloader written in Rust.**
 
-Built from scratch with zero legacy dependencies. Fast, efficient, and designed for self-hosters. Full NNTP pipeline with yEnc decoding, PAR2 verification & repair, archive extraction, and a clean web UI. No inherited technical debt -- just modern Rust with async I/O, connection pooling, and NNTP pipelining for maximum throughput.
+rustnzb takes an NZB and does the rest — pipelined NNTP downloads, SIMD yEnc
+decoding, PAR2 verification and repair, and archive extraction, wrapped in a
+web UI with real automation. One static binary, built for self-hosters.
 
 [![Rust](https://img.shields.io/badge/Rust-2024_edition-orange)](https://www.rust-lang.org/)
-[![Docker](https://img.shields.io/badge/Docker-GHCR-blue)](https://github.com/features/packages)
+[![Container](https://img.shields.io/badge/container-GHCR-blue)](https://github.com/TheDancingDeveloper-org/rustnzb/pkgs/container/rustnzbd)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![AGENTS.md](https://img.shields.io/badge/AGENTS.md-AI--friendly-8A2BE2)](AGENTS.md)
+
+> **rustnzb-restyle** is a fork of
+> [TheDancingDeveloper-org/rustnzb](https://github.com/TheDancingDeveloper-org/rustnzb)
+> with a redesigned, mobile-first web UI (light/dark/OLED themes, accent
+> colours, bottom navigation and sheets), its own GHCR image, an optional
+> ProtonVPN/Gluetun compose profile and Unraid notes. The download engine
+> tracks upstream.
+
+## Try it now — live demo
+
+**[www.rustnzb.dev/demo](https://www.rustnzb.dev/demo/)**
+
+The demo is the complete rustnzb interface running against a simulated backend
+in your browser — queue, history, statistics, newsgroup search, RSS rules, the
+media library, settings, all of it. Nothing to install, no Usenet provider
+required, and nothing leaves the page.
+
+More at [rustnzb.dev](https://rustnzb.dev/) · [GitHub Releases](https://github.com/TheDancingDeveloper-org/rustnzb/releases) · [Discord](https://discord.gg/pu6chSqpnJ)
 
 ---
 
 ## Features
 
-| | Feature | Description |
-|-|---------|-------------|
-| **⚡** | **NNTP Pipelining** | Send multiple ARTICLE commands per connection before reading responses. Configurable pipeline depth per server eliminates round-trip latency. |
-| **🔄** | **Multi-Server Failover** | Priority-ordered server list with automatic failover. Articles not found on one server are retried on the next. Optional servers for fill providers. |
-| **📦** | **yEnc Decoding** | Fast yEnc decoder with CRC32 validation. Handles multi-part articles, escape sequences, and assembles files from decoded segments. |
-| **🔧** | **PAR2 Verify & Repair** | Automatic PAR2 verification after download. Damaged files are repaired using recovery blocks before extraction. |
-| **📂** | **Archive Extraction** | Automatic extraction of RAR, 7z, and ZIP archives after download and repair. Supports multi-part RAR with cleanup. |
-| **🖥️** | **Clean Web UI** | Responsive single-page interface. Queue management, download history, server configuration, real-time logs, and drag-and-drop NZB upload. |
-| **🖱️** | **Desktop App** | Native desktop application for Windows, macOS, and Linux powered by Tauri. System tray with queue count and speed. |
-| **🔌** | **REST API** | Full HTTP API with Swagger/OpenAPI documentation. Queue, history, server management, status, and log endpoints. |
-| **🔁** | **SABnzbd Compatible** | Drop-in replacement for SABnzbd. Works out of the box with Sonarr, Radarr, Lidarr, and other *arr applications. |
-| **📡** | **OpenTelemetry** | Built-in tracing and metrics export via OTLP. Ship logs and metrics to Grafana, Jaeger, or any OTLP-compatible backend. |
-| **📥** | **SABnzbd Migration** | Import your SABnzbd configuration with one click. Upload your `sabnzbd.ini` or connect to a live instance. |
+| Feature | Description |
+|---------|-------------|
+| **NNTP pipelining** | Multiple ARTICLE commands in flight per connection. Configurable pipeline depth per server eliminates round-trip latency. |
+| **Multi-server failover** | Priority-ordered server list over TLS (rustls). Articles missing on one server are retried on the next; fill servers are only used when needed. |
+| **yEnc decoding** | SIMD-accelerated yEnc decoder with CRC32 validation, streamed straight into the file assembler. |
+| **PAR2 verify & repair** | Automatic verification after download. Damaged files are rebuilt from recovery blocks in pure Rust — no external par2 binary. |
+| **Archive extraction** | Automatic extraction of RAR, 7z, and ZIP archives after repair, multi-part sets included, with cleanup. |
+| **Overlapped pipeline** | Independent downloads, PAR2 repair, and extraction can progress together under explicit per-stage worker limits. |
+| **Web UI** | Queue, history with per-download insights, lifetime statistics, live logs, drag-and-drop NZB upload, and selectable themes. |
+| **Automation** | RSS feeds with regex rules, a watch folder, and a newsgroup browser with header search and threaded views. |
+| **Media library** | WebDAV library that streams files on demand, straight from Usenet, without downloading first. |
+| **REST API** | Full HTTP API with Swagger/OpenAPI documentation, plus a compatibility API for *arr applications. |
+| **Desktop app** | Native application for Windows, macOS, and Linux powered by Tauri. System tray with queue count and speed. |
+| **OpenTelemetry** | Built-in tracing and metrics export via OTLP. Ship logs and metrics to Grafana, Jaeger, or any OTLP-compatible backend. |
 
 ---
 
-## Benchmarks
-
-Head-to-head comparison with SABnzbd under identical conditions.
-
-### 1-Hour Stress Test
-
-Sustained load with continuous NZB submission -- 50 NNTP connections, 5 concurrent jobs.
-
-| Metric | rustnzb | SABnzbd |
-|--------|---------|---------|
-| Avg speed | **5,059 Mbps** | 1,002 Mbps |
-| NZBs completed / hour | **401** | 37 |
-| Downloaded in 1 hour | **2,287 GB** | 455 GB |
-| Memory over time | **Stable** (+2 MB/hr) | +2,412 MB/hr |
-
-### Scenario Comparisons
-
-| Scenario | rustnzb | SABnzbd | Improvement |
-|----------|---------|---------|-------------|
-| 5 GB raw download | **4.2s** @ 10,316 Mbps | 5.0s @ 8,535 Mbps | +21% faster |
-| 10 GB raw download | **10.2s** @ 8,394 Mbps | 14.1s @ 6,098 Mbps | +38% faster |
-| 10 GB + 7z extraction | **19.9s** | 29.2s | +47% faster |
-| 5 GB + PAR2 repair | 33.5s (4.0s download) | 30.4s (9.4s download) | 2.4x faster download, 60% less memory |
-
-All benchmarks run on the same machine using Docker containers with identical configuration. Data served by a mock NNTP server to eliminate network variability. Full methodology and raw data in `benchnzb/`.
-
----
-
-## Getting Started
+## Getting started
 
 ### Docker
 
@@ -67,7 +61,7 @@ docker run -d \
   -v ./config:/config \
   -v ./data:/data \
   -v /path/to/downloads:/downloads \
-  ghcr.io/<DEIN_GHCR_OWNER>/rustnzb-restyle:latest
+  ghcr.io/futureman0/rustnzb-restyle:latest
 ```
 
 Open `http://localhost:9090` and add your NNTP servers via the web UI.
@@ -77,40 +71,41 @@ Open `http://localhost:9090` and add your NNTP servers via the web UI.
 ```bash
 git clone https://github.com/FutureMan0/rustnzb-restyle.git
 cd rustnzb-restyle
-cp config.example.toml config.toml
-COMPOSE_PROFILES=direct docker compose up -d
+cp apps/rustnzb/config.example.toml config.toml
+RUSTNZB_GHCR_OWNER=futureman0 COMPOSE_PROFILES=direct docker compose up -d
 ```
 
-ProtonVPN via Gluetun (Kill-Switch):
+Behind ProtonVPN via Gluetun (kill switch; secrets only via environment
+variables, see `docker-compose.yml`):
 
 ```bash
+RUSTNZB_GHCR_OWNER=futureman0 \
 COMPOSE_PROFILES=vpn \
-RUSTNZB_VPN_ENABLED=true \
-RUSTNZB_VPN_PROVIDER=protonvpn \
 RUSTNZB_VPN_TRANSPORT=wireguard \
 RUSTNZB_VPN_PROFILE=nl \
 docker compose up -d
 ```
 
-### Unraid (Community Applications)
+### Unraid
 
-Siehe [`docs/unraid.md`](docs/unraid.md) für die empfohlenen Volumes/Env-Variablen und Update-Workflow.
+See [`docs/unraid.md`](docs/unraid.md) for the recommended volumes,
+environment variables and update workflow.
 
-### Desktop App
+### Binaries
 
-Native application for Windows and Linux powered by Tauri.
+Download the latest release from [GitHub Releases](https://github.com/TheDancingDeveloper-org/rustnzb/releases):
 
-Download the latest installer from [GitHub Releases](https://github.com/AusAgentSmith-org/rustnzb/releases):
-- **Windows** -- `.exe` (NSIS installer)
-- **Linux** -- `.deb` or `.rpm`
+- **Linux** — `tar.gz` (x86_64, aarch64) or `.deb` (amd64, arm64, installs a systemd service)
+- **Windows** — NSIS installer
+- SHA256 checksums are attached to every release
 
-### From Source
+### From source
 
 ```bash
 git clone https://github.com/FutureMan0/rustnzb-restyle.git
 cd rustnzb-restyle
-cp config.example.toml config.toml
-cargo build --release
+cp apps/rustnzb/config.example.toml config.toml
+cargo build -p rustnzb --release
 ./target/release/rustnzb
 ```
 
@@ -118,11 +113,13 @@ Requirements: Rust 1.88+ (2024 edition), `7z` for archive extraction.
 
 ---
 
-## Sonarr & Radarr Integration
+## Sonarr & Radarr integration
 
-rustnzb is a drop-in replacement for SABnzbd -- use the **SABnzbd** download client type in your *arr apps.
+rustnzb speaks the download-client API that *arr applications already use —
+Sonarr, Radarr, Lidarr, Readarr, and Prowlarr connect with their standard
+settings.
 
-1. In Sonarr/Radarr, go to **Settings > Download Clients > Add** and select **SABnzbd**
+1. In your *arr app, go to **Settings > Download Clients > Add** and select the **SABnzbd** client type
 2. Set **Host** and **Port** to your rustnzb instance
 3. Enter your `api_key` (if configured in `config.toml`)
 4. Set **Category** to match your rustnzb categories (e.g. `tv`, `movies`)
@@ -140,8 +137,6 @@ name = "movies"
 output_dir = "movies"
 ```
 
-Works with Sonarr, Radarr, Lidarr, Readarr, and Prowlarr.
-
 ---
 
 ## Architecture
@@ -151,20 +146,35 @@ A modular Rust workspace with clean separation of concerns.
 | Crate | Purpose |
 |-------|---------|
 | **nzb-core** | NZB parser, config, SQLite database, shared models |
+| **nzb-news** | Download orchestration primitives and queue/worker coordination |
+| **nzb-dispatch** | Server-aware dispatch engine that feeds article fetch work to `nzb-news` |
 | **nzb-nntp** | NNTP protocol, connection pool, TLS (rustls), pipelining, server failover |
 | **nzb-decode** | yEnc decoder, CRC32 validation, file assembler |
 | **nzb-postproc** | PAR2 verify & repair, RAR/7z/ZIP extraction, cleanup |
-| **nzb-web** | Axum HTTP server, REST API, web UI, queue manager, SABnzbd compat |
+| **nzb-web** | Axum HTTP server, REST API, web UI, queue manager |
 
-### Download Pipeline
+### Download pipeline
 
 ```
-Parse NZB ─> Download (NNTP pipelining, multi-server failover)
-         ─> Decode (yEnc + CRC32)
-         ─> Verify & Repair (PAR2)
-         ─> Extract (RAR, 7z, ZIP)
-         ─> Complete
+Parse NZB
+  -> nzb-web queue manager
+  -> nzb-dispatch
+  -> nzb-news
+  -> Download (nzb-nntp pipelining, multi-server failover)
+  -> Decode (yEnc + CRC32)
+  -> Verify & Repair (PAR2, bounded repair workers)
+  -> Extract (RAR, 7z, ZIP, bounded extraction workers)
+  -> Complete
 ```
+
+When one job leaves the download phase, its download slot is immediately
+available to the next queued job. Post-processing uses independent global
+limits (`max_post_processing_jobs`, `max_repair_workers`, and
+`max_extract_workers`), so a download, a repair, and an extraction may overlap
+without allowing CPU- or disk-heavy stages to grow without bound. Higher
+limits increase throughput at the cost of memory, CPU, and disk contention.
+Interrupted post-processing jobs resume from the post-processing boundary on
+restart.
 
 ---
 
@@ -174,23 +184,34 @@ rustnzb uses TOML configuration with CLI and environment variable overrides.
 
 **Priority:** CLI args > environment variables > TOML file > defaults
 
-Most settings can be configured through the web UI. See [`config.example.toml`](config.example.toml) for the full reference.
+Most settings can be configured through the web UI. See
+[`apps/rustnzb/config.example.toml`](apps/rustnzb/config.example.toml) for the
+full reference.
 
-### Key Environment Variables
+### Key environment variables
 
 | Variable | Description |
 |----------|-------------|
 | `RUSTNZB_CONFIG` | Config file path |
 | `RUSTNZB_PORT` | Listen port |
 | `RUSTNZB_LOG_LEVEL` | Log level (trace/debug/info/warn/error) |
-| `RUSTNZB_VPN_ENABLED` | VPN mode override (`true`/`false`) |
-| `RUSTNZB_VPN_PROVIDER` | VPN provider override (e.g. `protonvpn`) |
-| `RUSTNZB_VPN_TRANSPORT` | VPN transport override (`wireguard`/`openvpn`) |
-| `RUSTNZB_VPN_PROFILE` | VPN region/profile override (e.g. `nl`) |
-| `OTEL_ENABLED` | Enable OpenTelemetry |
+| `RUSTNZB_DAV_ENABLED` | Enable the Media Library (DAV) at startup |
+| `RUSTNZB_VPN_ENABLED` | Declare that rustnzb runs behind a VPN gateway (logged at startup) |
+| `RUSTNZB_VPN_PROVIDER` | VPN provider name (e.g. `protonvpn`) |
+| `RUSTNZB_VPN_TRANSPORT` | `wireguard` or `openvpn` |
+| `RUSTNZB_VPN_PROFILE` | VPN region/profile (e.g. `nl`) |
+| `OTEL_ENABLED` | Toggle for OTEL logs + metrics export |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP gRPC endpoint |
+| `OTEL_SERVICE_NAME` | Service name for telemetry |
 
-### Docker Volumes
+> **Docker note:** setting `RUSTNZB_PORT` changes the port the app listens
+> on *inside* the container (default `9090`). The image's `EXPOSE 9090` is
+> static Dockerfile metadata and won't follow it, so remap the host port to
+> match your chosen value yourself: `-p <host-port>:$RUSTNZB_PORT` (don't
+> rely on `-P`/auto-mapping, which only publishes the declared `EXPOSE`
+> port).
+
+### Docker volumes
 
 | Path | Purpose |
 |------|---------|
@@ -202,7 +223,8 @@ Most settings can be configured through the web UI. See [`config.example.toml`](
 
 ## API
 
-Interactive API documentation is available at `/swagger-ui` when the server is running.
+Interactive API documentation is available at `/swagger-ui` when the server is
+running.
 
 ```bash
 # Add NZB by URL
@@ -210,26 +232,89 @@ curl -X POST http://localhost:9090/api/queue/add-url \
   -H "Content-Type: application/json" \
   -d '{"url": "https://example.com/file.nzb", "category": "movies"}'
 
-# Upload NZB file
+# Upload NZB file (optional fields: category/cat, priority 0-3,
+# name/nzbname; each may also be passed as a query parameter, and a form
+# field wins over the query)
 curl -X POST http://localhost:9090/api/queue/add \
-  -F "file=@/path/to/file.nzb" -F "category=tv"
+  -F "file=@/path/to/file.nzb" -F "category=tv" -F "priority=2"
+
+# Upload an NZB with an archive password (multipart `password` field;
+# `add-url` takes a JSON `password`)
+curl -X POST http://localhost:9090/api/queue/add \
+  -F "file=@/path/to/file.nzb" -F "password=secret"
 
 # Check status
 curl http://localhost:9090/api/status
 ```
 
-The SABnzbd-compatible API is available at `/sabnzbd/api`.
+Job names follow SABnzbd's inline-password convention on both APIs: a name
+or NZB file name of the form `Name{{password}}` or `Name/password` sets the
+job password and is queued as `Name`. An explicit `password` wins over the
+inline one, which wins over a password embedded in the NZB.
+
+The *arr-compatible API is served at `/sabnzbd/api`.
 
 ---
 
 ## Development
 
 ```bash
-cargo build              # Debug build
-cargo build --release    # Release build
-cargo test --workspace   # All tests
-cargo test -p nzb-decode # Single crate
+cargo build -p rustnzb              # Debug build
+cargo build -p rustnzb --release    # Release build
+cargo test --workspace              # All tests
+cargo test -p nzb-decode            # Single crate
 ```
+
+For exact CI parity, use the checked-in container task interface:
+
+```bash
+./ci/run fmt
+./ci/run check
+./ci/run test
+./ci/run clippy
+./ci/run e2e
+```
+
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full task list and
+build details. See [CONTRIBUTING.md](CONTRIBUTING.md) for repository workflow
+and [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) for current user-visible
+limitations.
+
+---
+
+## AI-friendly by design
+
+rustnzb is built to be worked on by AI coding agents as well as people, and
+agent-assisted pull requests are welcome.
+
+[**AGENTS.md**](AGENTS.md) is the entry point for any agent: it maps the
+workspace crate by crate, lists the exact build and test commands, states the
+project conventions, marks the compatibility surfaces that must not drift, and
+sets explicit boundaries on what an agent should not do unprompted. It follows
+the [agents.md](https://agents.md/) convention, so Claude Code, Codex, Cursor,
+Copilot, Gemini CLI, Aider, and anything else that reads `AGENTS.md` pick it up
+automatically.
+
+What makes the repository tractable for an agent:
+
+- **Deterministic checks.** `cargo fmt`, `cargo check`, `cargo clippy -D
+  warnings`, and `cargo test --workspace` are the whole gate — no hidden steps.
+- **Reproducible environments.** `./ci/run <task>` executes the same
+  checked-in task scripts in the same pinned images CI uses, so local results
+  and CI results agree.
+- **No live dependencies in tests.** `crates/mock-nntp-server` provides a
+  deterministic NNTP fixture; nothing in the test suite needs a Usenet
+  provider, network access, or wall-clock timing.
+- **Documented contracts.** The REST API is annotated with utoipa and served
+  at `/swagger-ui`; the SABnzbd compatibility layer is checked against captured
+  SABnzbd 5.0.4 golden responses, so a response-shape regression fails CI
+  rather than a user's client.
+- **Clear boundaries.** Small crates with narrow responsibilities, so a change
+  usually touches one of them.
+
+Contributor expectations for AI-assisted changes — reviewing the complete
+change, running the tests, reporting results accurately — are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
@@ -239,4 +324,8 @@ MIT
 
 ---
 
-Also by [AusAgentSmith](https://github.com/AusAgentSmith-org): [Indexarr](https://indexarr.net) | [rustTorrent](https://rusttorrent.dev)
+## Contributing and security
+
+Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md),
+[SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before
+opening an issue or pull request.

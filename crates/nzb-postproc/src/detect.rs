@@ -1,0 +1,881 @@
+//! File detection helpers for post-processing.
+//!
+//! Scans a completed download directory to find par2 files, RAR archives,
+//! 7z archives, TAR archives, ZIP archives, and cleanup candidates.
+
+use std::collections::BTreeMap;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
+
+/// RAR 4.x volume signature.
+const RAR4_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x00";
+/// RAR 5.x volume signature.
+const RAR5_SIGNATURE: &[u8] = b"Rar!\x1a\x07\x01\x00";
+
+/// Returns true if the file begins with a RAR volume signature.
+///
+/// Obfuscated posts strip every naming cue, so content is the only reliable
+/// evidence that a `<hash>.NN` file is an archive volume. Extension matching
+/// alone would misclassify unrelated numeric-suffixed files.
+pub fn has_rar_signature(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    // Read up to the longest signature; short files simply cannot match.
+    let mut header = [0u8; RAR5_SIGNATURE.len()];
+    let mut filled = 0;
+    while filled < header.len() {
+        match file.read(&mut header[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(_) => return false,
+        }
+    }
+    let head = &header[..filled];
+    head.starts_with(RAR4_SIGNATURE) || head.starts_with(RAR5_SIGNATURE)
+}
+
+/// Split a bare numeric extension: `"cfd4be79….45"` → `("cfd4be79…", 45)`.
+///
+/// Returns `None` for anything with a non-numeric extension, and for split 7z
+/// volumes (`archive.7z.001`) — those are numeric too, but they belong to the
+/// 7z path and must not be reclassified as RAR.
+fn split_numeric_volume(filename: &str) -> Option<(&str, u32)> {
+    let dot = filename.rfind('.')?;
+    let ext = &filename[dot + 1..];
+    if ext.is_empty() || !ext.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let stem = &filename[..dot];
+    if stem.to_ascii_lowercase().ends_with(".7z") {
+        return None;
+    }
+    ext.parse::<u32>().ok().map(|num| (stem, num))
+}
+
+/// Parsed RAR volume information: set name and volume number.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RarVolumeInfo {
+    /// The base name of the RAR set (e.g. "movie" from "movie.part003.rar").
+    pub set_name: String,
+    /// Zero-based volume number. For new-style `.partNNN.rar`, this is NNN-1.
+    /// For old-style, `.rar` = 0, `.r00` = 1, `.r01` = 2, etc.
+    pub volume_number: u32,
+}
+
+/// Parse a filename to extract RAR set name and volume number.
+///
+/// Returns `None` if the file isn't a recognizable RAR volume.
+///
+/// Handles:
+///   - New-style: `"movie.part001.rar"` → `("movie", 0)`, `"movie.part002.rar"` → `("movie", 1)`
+///   - Old-style: `"movie.rar"` → `("movie", 0)`, `"movie.r00"` → `("movie", 1)`, `"movie.r01"` → `("movie", 2)`
+pub fn parse_rar_volume(filename: &str) -> Option<RarVolumeInfo> {
+    let name_lower = filename.to_ascii_lowercase();
+
+    // New-style: .partNNN.rar
+    if let Some(stem) = name_lower.strip_suffix(".rar") {
+        if let Some(dot_pos) = stem.rfind(".part") {
+            let part_num_str = &stem[dot_pos + 5..];
+            if !part_num_str.is_empty()
+                && part_num_str.chars().all(|c| c.is_ascii_digit())
+                && let Ok(part_num) = part_num_str.parse::<u32>()
+            {
+                // Use the original filename's casing for set_name
+                let set_name = &filename[..dot_pos];
+                return Some(RarVolumeInfo {
+                    set_name: set_name.to_string(),
+                    volume_number: part_num.saturating_sub(1),
+                });
+            }
+        }
+        // Plain .rar — first volume in old-style set
+        let set_name = &filename[..filename.len() - 4];
+        return Some(RarVolumeInfo {
+            set_name: set_name.to_string(),
+            volume_number: 0,
+        });
+    }
+
+    // Old-style continuation: .r00, .r01, ..., .s00, etc. The letter runs
+    // r..=z only; .n64, .a52, .c01 and friends are unrelated formats.
+    if name_lower.len() > 4
+        && let Some(last4) = name_lower.get(name_lower.len() - 4..)
+        && last4.starts_with('.')
+        && (b'r'..=b'z').contains(&last4.as_bytes()[1])
+        && last4.as_bytes()[2].is_ascii_digit()
+        && last4.as_bytes()[3].is_ascii_digit()
+    {
+        let letter = last4.as_bytes()[1];
+        let tens = (last4.as_bytes()[2] - b'0') as u32;
+        let ones = (last4.as_bytes()[3] - b'0') as u32;
+        // .r00 = volume 1, .r01 = volume 2, ..., .r99 = volume 100
+        // .s00 = volume 101, .s01 = volume 102, etc.
+        let letter_offset = (letter - b'r') as u32 * 100;
+        let vol = letter_offset + tens * 10 + ones + 1;
+        let set_name = &filename[..filename.len() - 4];
+        return Some(RarVolumeInfo {
+            set_name: set_name.to_string(),
+            volume_number: vol,
+        });
+    }
+
+    None
+}
+
+/// Parse a RAR volume from a file on disk, falling back to content inspection.
+///
+/// [`parse_rar_volume`] can only judge names, so it cannot recognise an
+/// obfuscated volume like `cfd4be79….45`. This variant additionally accepts a
+/// bare numeric extension when the file actually begins with a RAR signature —
+/// evidence a filename cannot provide. Prefer it wherever a path is available.
+///
+/// The volume number for an obfuscated set is the numeric extension itself, so
+/// volumes order correctly relative to one another within the set. It is not
+/// comparable with the numbering [`parse_rar_volume`] assigns to conventional
+/// sets, which is anchored to `.rar` = 0.
+pub fn parse_rar_volume_at(path: &Path) -> Option<RarVolumeInfo> {
+    let name = path.file_name().and_then(|n| n.to_str())?;
+    if let Some(info) = parse_rar_volume(name) {
+        return Some(info);
+    }
+    let (set_name, volume_number) = split_numeric_volume(name)?;
+    if !has_rar_signature(path) {
+        return None;
+    }
+    Some(RarVolumeInfo {
+        set_name: set_name.to_string(),
+        volume_number,
+    })
+}
+
+/// The type of archive detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveType {
+    Rar,
+    SevenZip,
+    Tar,
+    Zip,
+}
+
+impl std::fmt::Display for ArchiveType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rar => write!(f, "RAR"),
+            Self::SevenZip => write!(f, "7z"),
+            Self::Tar => write!(f, "TAR"),
+            Self::Zip => write!(f, "ZIP"),
+        }
+    }
+}
+
+/// Find all `.par2` files in a directory. The index par2 file (without
+/// `.volNNN+NNN.par2` or `.volNNN-NNN.par2` suffix) is returned first so callers can use it
+/// as the primary verification target.
+pub fn find_par2_files(dir: &Path) -> Vec<PathBuf> {
+    let mut index_files: Vec<PathBuf> = Vec::new();
+    let mut volume_files: Vec<PathBuf> = Vec::new();
+
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_lowercase(),
+            None => continue,
+        };
+        if !name.ends_with(".par2") {
+            continue;
+        }
+        // Index par2 files do NOT contain ".vol" before ".par2"
+        if is_par2_volume(&name) {
+            volume_files.push(path.to_path_buf());
+        } else {
+            index_files.push(path.to_path_buf());
+        }
+    }
+
+    index_files.sort();
+    volume_files.sort();
+
+    // Index files first, then volumes
+    index_files.extend(volume_files);
+    index_files
+}
+
+/// Returns true if a filename looks like a par2 volume file (e.g.
+/// `foo.vol00+01.par2` or `foo.vol00-01.par2`) rather than the index file.
+pub(crate) fn is_par2_volume(name_lower: &str) -> bool {
+    // Typical patterns: .vol000+000.par2 and .vol000-000.par2.
+    // We check for ".vol" anywhere before the final ".par2"
+    let without_ext = name_lower.trim_end_matches(".par2");
+    // Look for ".vol" followed by digits, a '+', and more digits
+    if let Some(vol_pos) = without_ext.rfind(".vol") {
+        let after_vol = &without_ext[vol_pos + 4..];
+        // Check pattern: digits + '+' + digits
+        if let Some(separator_pos) = after_vol.find(['+', '-']) {
+            let before_separator = &after_vol[..separator_pos];
+            let after_separator = &after_vol[separator_pos + 1..];
+            return !before_separator.is_empty()
+                && before_separator.chars().all(|c| c.is_ascii_digit())
+                && !after_separator.is_empty()
+                && after_separator.chars().all(|c| c.is_ascii_digit());
+        }
+    }
+    false
+}
+
+/// Find the first RAR volume(s) in a directory. Handles both old-style naming
+/// (.rar, .r00, .r01, ...) and new-style (.part001.rar, .part002.rar, ...).
+///
+/// Returns only the *first* volume of each archive set (the one you pass to
+/// `unrar x`).
+pub fn find_rar_files(dir: &Path) -> Vec<PathBuf> {
+    let mut first_volumes: Vec<PathBuf> = Vec::new();
+    // Obfuscated sets keyed by set name → (lowest volume seen, its path).
+    let mut numeric_sets: BTreeMap<String, (u32, PathBuf)> = BTreeMap::new();
+
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        let name_lower = name.to_lowercase();
+
+        // New-style: .part001.rar is the first volume
+        if name_lower.ends_with(".rar")
+            && let Some(stem) = name_lower.strip_suffix(".rar")
+        {
+            // Check for .partNNN pattern
+            if let Some(dot_pos) = stem.rfind(".part") {
+                let part_num_str = &stem[dot_pos + 5..];
+                if !part_num_str.is_empty()
+                    && part_num_str.chars().all(|c| c.is_ascii_digit())
+                    && let Ok(part_num) = part_num_str.parse::<u32>()
+                {
+                    if part_num == 1 {
+                        first_volumes.push(path.to_path_buf());
+                    }
+                    // part > 1 is not a first volume
+                    continue;
+                }
+            }
+            // Plain .rar with no .partNNN — this is the first volume in old-style
+            first_volumes.push(path.to_path_buf());
+            continue;
+        }
+        // Old-style: .r00, .r01, etc. — we do NOT add these; the .rar file
+        // is the first volume in old-style sets.
+        if parse_rar_volume(&name_lower).is_some() {
+            continue;
+        }
+
+        // Obfuscated set: `<name>.NN` with no recognisable extension. Only
+        // files that actually begin with a RAR signature qualify, so unrelated
+        // numeric-suffixed files (`Concert.Recording.1987`) are left alone.
+        // The lowest-numbered volume is treated as the one to hand to unrar.
+        if let Some((set_name, volume_number)) = split_numeric_volume(&name_lower)
+            && has_rar_signature(path)
+        {
+            numeric_sets
+                .entry(set_name.to_string())
+                .and_modify(|(lowest, lowest_path)| {
+                    if volume_number < *lowest {
+                        *lowest = volume_number;
+                        *lowest_path = path.to_path_buf();
+                    }
+                })
+                .or_insert_with(|| (volume_number, path.to_path_buf()));
+        }
+    }
+
+    first_volumes.extend(numeric_sets.into_values().map(|(_, path)| path));
+    first_volumes.sort();
+    first_volumes
+}
+
+/// Detect all archives in a directory. Returns (ArchiveType, path) pairs.
+/// For multi-volume RAR sets, only the first volume is returned.
+pub fn find_archives(dir: &Path) -> Vec<(ArchiveType, PathBuf)> {
+    let mut archives: Vec<(ArchiveType, PathBuf)> = Vec::new();
+
+    // RAR first volumes
+    for path in find_rar_files(dir) {
+        archives.push((ArchiveType::Rar, path));
+    }
+
+    // 7z (including split volumes), TAR, and ZIP
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_lowercase(),
+            None => continue,
+        };
+
+        if name.ends_with(".7z") || name.ends_with(".7z.enc") {
+            archives.push((ArchiveType::SevenZip, path.to_path_buf()));
+        } else if is_split_7z_first_volume(&name) {
+            // Split 7z: .7z.001 is the first volume — 7z handles the rest
+            archives.push((ArchiveType::SevenZip, path.to_path_buf()));
+        } else if name.ends_with(".tar") {
+            archives.push((ArchiveType::Tar, path.to_path_buf()));
+        } else if name.ends_with(".zip") {
+            archives.push((ArchiveType::Zip, path.to_path_buf()));
+        }
+    }
+
+    archives.sort_by(|a, b| a.1.cmp(&b.1));
+    archives
+}
+
+/// Find files that are safe to delete after successful extraction.
+/// This includes par2 files, RAR volumes (old-style and new-style), and
+/// other recovery/split files.
+pub fn find_cleanup_files(dir: &Path) -> Vec<PathBuf> {
+    let mut cleanup: Vec<PathBuf> = Vec::new();
+
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_lowercase(),
+            None => continue,
+        };
+
+        if is_cleanup_candidate_at(path, &name) {
+            cleanup.push(path.to_path_buf());
+        }
+    }
+
+    cleanup.sort();
+    cleanup
+}
+
+/// Returns whether a completed output directory contains at least one file
+/// that is not an archive or PAR2 recovery artifact. This is deliberately a
+/// conservative final-status check: a job made solely of raw recovery and
+/// archive files is not a usable completed download.
+pub fn has_usable_output(dir: &Path) -> std::io::Result<bool> {
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_cleanup_candidate_at(path, &name.to_ascii_lowercase()) {
+            return Ok(true);
+        }
+    }
+
+    // Distinguish an empty, readable output directory from a missing one.
+    std::fs::read_dir(dir)?;
+    Ok(false)
+}
+
+/// Returns true if a lowercased filename is the first volume of a split 7z
+/// archive (e.g., `archive.7z.001`).
+fn is_split_7z_first_volume(name_lower: &str) -> bool {
+    // Pattern: anything.7z.001
+    if let Some(stem) = name_lower.strip_suffix(".001") {
+        return stem.ends_with(".7z");
+    }
+    false
+}
+
+/// Returns true if a lowercased filename is any volume of a split 7z archive
+/// (e.g., `.7z.001`, `.7z.002`, ...).
+fn is_split_7z_volume(name_lower: &str) -> bool {
+    // Pattern: anything.7z.NNN where NNN is digits
+    if let Some(dot_pos) = name_lower.rfind('.') {
+        let ext = &name_lower[dot_pos + 1..];
+        if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_digit()) {
+            let stem = &name_lower[..dot_pos];
+            return stem.ends_with(".7z");
+        }
+    }
+    false
+}
+
+/// Determine whether a file on disk is safe to clean up after successful
+/// extraction, using its name and — where the name is uninformative — its
+/// content.
+///
+/// `name_lower` must be the lowercased file name of `path`.
+///
+/// An obfuscated `<hash>.NN` volume is indistinguishable by name from an
+/// ordinary file that happens to end in digits, so the RAR signature is what
+/// separates junk to delete from payload to keep. Getting this wrong in either
+/// direction is costly: treating payload as junk deletes it, and treating an
+/// archive volume as payload lets a job report Completed with nothing usable
+/// in it (issue #87).
+fn is_cleanup_candidate_at(path: &Path, name_lower: &str) -> bool {
+    if is_cleanup_candidate(name_lower) {
+        return true;
+    }
+    // Old-style continuation volume (.r00 ... .z99). `.r00` is also a
+    // plausible name for ordinary payload, so only treat it as a volume when
+    // it belongs to a RAR set present alongside it or is itself a RAR file.
+    if !name_lower.ends_with(".rar")
+        && let Some(info) = parse_rar_volume(name_lower)
+    {
+        return has_rar_first_volume(path, &info.set_name) || has_rar_signature(path);
+    }
+    split_numeric_volume(name_lower).is_some() && has_rar_signature(path)
+}
+
+/// Returns true if the directory containing `path` holds the first volume
+/// (`<set>.rar` or `<set>.partNN.rar`) of the RAR set named `set_lower`.
+/// Matching is case-insensitive; `set_lower` must already be lowercased.
+fn has_rar_first_volume(path: &Path, set_lower: &str) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let Some(name) = entry.file_name().to_str().map(str::to_lowercase) else {
+            return false;
+        };
+        name.ends_with(".rar")
+            && parse_rar_volume(&name).is_some_and(|info| info.set_name == set_lower)
+            && entry.file_type().is_ok_and(|t| t.is_file())
+    })
+}
+
+/// Determine whether a file (by its lowercased name alone) is safe to clean up
+/// after successful extraction.
+///
+/// Name-only: prefer [`is_cleanup_candidate_at`] wherever a path is available,
+/// so obfuscated volumes are caught too.
+fn is_cleanup_candidate(name: &str) -> bool {
+    // Par2 files: .par2
+    if name.ends_with(".par2")
+        || name.ends_with(".zip")
+        || name.ends_with(".7z")
+        || name.ends_with(".tar")
+    {
+        return true;
+    }
+
+    // RAR volumes (new-style): .part001.rar, .part002.rar, ...
+    // and plain .rar files
+    if name.ends_with(".rar") {
+        return true;
+    }
+
+    // Old-style RAR split volumes (.r00, .s00, ...) are deliberately not
+    // matched here: the same name shape is used by unrelated payload, so they
+    // need on-disk evidence — see `is_cleanup_candidate_at`.
+
+    // Split 7z volumes: .7z.001, .7z.002, etc.
+    if is_split_7z_volume(name) {
+        return true;
+    }
+
+    // Encrypted 7z archives: .7z.enc
+    if name.ends_with(".7z.enc") {
+        return true;
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Create a temporary directory with the given filenames (empty files).
+    fn make_test_dir(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for name in files {
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(&path, b"").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn test_find_par2_index_first() {
+        let dir = make_test_dir(&["movie.vol00+01.par2", "movie.vol01+02.par2", "movie.par2"]);
+        let results = find_par2_files(dir.path());
+        assert_eq!(results.len(), 3);
+        // Index file should come first
+        assert!(
+            results[0].file_name().unwrap().to_str().unwrap() == "movie.par2",
+            "Index par2 file should be first, got {:?}",
+            results[0]
+        );
+    }
+
+    #[test]
+    fn test_find_par2_hyphenated_volumes_after_index() {
+        let dir = make_test_dir(&["movie.vol63-67.par2", "movie.par2", "movie.vol00-01.par2"]);
+        let files = find_par2_files(dir.path());
+        assert_eq!(files[0].file_name().unwrap(), "movie.par2");
+        assert_eq!(files.len(), 3);
+    }
+
+    #[test]
+    fn test_find_par2_empty_dir() {
+        let dir = make_test_dir(&["readme.txt", "movie.mkv"]);
+        let results = find_par2_files(dir.path());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_rar_new_style() {
+        let dir = make_test_dir(&[
+            "archive.part001.rar",
+            "archive.part002.rar",
+            "archive.part003.rar",
+        ]);
+        let results = find_rar_files(dir.path());
+        // Only the first volume should be returned
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .contains("part001"),
+        );
+    }
+
+    #[test]
+    fn test_find_rar_old_style() {
+        let dir = make_test_dir(&["archive.rar", "archive.r00", "archive.r01", "archive.r02"]);
+        let results = find_rar_files(dir.path());
+        // Only .rar (the first volume) should be returned
+        assert_eq!(results.len(), 1);
+        assert!(
+            results[0]
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".rar")
+        );
+    }
+
+    #[test]
+    fn test_find_archives_mixed() {
+        let dir = make_test_dir(&[
+            "movie.part001.rar",
+            "movie.part002.rar",
+            "subs.zip",
+            "extras.7z",
+        ]);
+        let results = find_archives(dir.path());
+        let types: Vec<ArchiveType> = results.iter().map(|(t, _)| *t).collect();
+        assert!(types.contains(&ArchiveType::Rar));
+        assert!(types.contains(&ArchiveType::Zip));
+        assert!(types.contains(&ArchiveType::SevenZip));
+        // RAR should only have 1 entry (first volume)
+        assert_eq!(types.iter().filter(|&&t| t == ArchiveType::Rar).count(), 1);
+    }
+
+    #[test]
+    fn usable_output_requires_a_non_artifact_file() {
+        let raw_only = make_test_dir(&[
+            "release.part001.rar",
+            "release.part002.rar",
+            "release.par2",
+            "release.vol00+01.par2",
+            "release.7z",
+        ]);
+        assert!(!has_usable_output(raw_only.path()).unwrap());
+
+        let payload = make_test_dir(&["release.part001.rar", "Movie.2024.mkv"]);
+        assert!(has_usable_output(payload.path()).unwrap());
+    }
+
+    #[test]
+    fn test_find_cleanup_files() {
+        let dir = make_test_dir(&[
+            "movie.par2",
+            "movie.vol00+01.par2",
+            "movie.part001.rar",
+            "movie.part002.rar",
+            "movie.r00",
+            "movie.r01",
+            "movie.mkv",  // should NOT be cleaned up
+            "readme.txt", // should NOT be cleaned up
+        ]);
+        let results = find_cleanup_files(dir.path());
+        // par2 (2) + rar (2) + r00 + r01 = 6
+        assert_eq!(
+            results.len(),
+            6,
+            "Expected 6 cleanup files, got: {results:?}"
+        );
+        // .mkv and .txt should NOT be present
+        for path in &results {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(!name.ends_with(".mkv"));
+            assert!(!name.ends_with(".txt"));
+        }
+    }
+
+    #[test]
+    fn test_is_par2_volume() {
+        assert!(is_par2_volume("file.vol00+01.par2"));
+        assert!(is_par2_volume("file.vol123+456.par2"));
+        assert!(is_par2_volume("file.vol00-01.par2"));
+        assert!(is_par2_volume("file.vol63-67.par2"));
+        assert!(!is_par2_volume("file.par2"));
+        assert!(!is_par2_volume("file.volume.par2"));
+    }
+
+    #[test]
+    fn test_cleanup_old_style_volumes() {
+        let dir = make_test_dir(&[
+            "archive.rar",
+            "archive.r00",
+            "archive.r99",
+            "archive.s00",
+            "readme.txt",
+            "movie.mkv",
+        ]);
+        let candidate = |name: &str| {
+            is_cleanup_candidate_at(&dir.path().join(name), &name.to_ascii_lowercase())
+        };
+        assert!(candidate("archive.r00"));
+        assert!(candidate("archive.r99"));
+        assert!(candidate("archive.s00"));
+        assert!(!candidate("readme.txt"));
+        assert!(!candidate("movie.mkv"));
+    }
+
+    #[test]
+    fn test_cleanup_keeps_letter_digit_payload_without_rar_set() {
+        // No archive anywhere: these are payload (N64 ROM, C64 disk image,
+        // and an orphan .r00 that is not a RAR volume) and must survive.
+        let dir = make_test_dir(&["Game.n64", "disk.d64", "notes.r00", "readme.txt"]);
+        let results = find_cleanup_files(dir.path());
+        assert!(
+            results.is_empty(),
+            "payload marked for cleanup: {results:?}"
+        );
+        assert!(has_usable_output(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn test_cleanup_old_style_volume_matches_set_case_insensitively() {
+        let dir = make_test_dir(&["Movie.RAR", "Movie.R00", "movie.r01", "Game.n64"]);
+        let names: Vec<String> = find_cleanup_files(dir.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["Movie.R00", "Movie.RAR", "movie.r01"]);
+    }
+
+    #[test]
+    fn test_cleanup_orphan_old_style_volume_with_rar_signature() {
+        // A continuation volume whose first volume is gone is still a RAR
+        // volume when its content says so.
+        let dir = make_test_dir(&[]);
+        fs::write(dir.path().join("movie.r00"), b"Rar!\x1a\x07\x00rest").unwrap();
+        let results = find_cleanup_files(dir.path());
+        assert_eq!(results.len(), 1, "{results:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Split 7z archive detection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_split_7z_first_volume() {
+        assert!(is_split_7z_first_volume("archive.7z.001"));
+        assert!(is_split_7z_first_volume("my.movie.7z.001"));
+        assert!(!is_split_7z_first_volume("archive.7z.002"));
+        assert!(!is_split_7z_first_volume("archive.7z.010"));
+        assert!(!is_split_7z_first_volume("archive.7z"));
+        assert!(!is_split_7z_first_volume("archive.rar.001"));
+    }
+
+    #[test]
+    fn test_split_7z_volume() {
+        assert!(is_split_7z_volume("archive.7z.001"));
+        assert!(is_split_7z_volume("archive.7z.002"));
+        assert!(is_split_7z_volume("archive.7z.099"));
+        assert!(!is_split_7z_volume("archive.7z"));
+        assert!(!is_split_7z_volume("archive.rar.001"));
+        assert!(!is_split_7z_volume("archive.7z.abc"));
+    }
+
+    #[test]
+    fn test_find_archives_split_7z() {
+        let dir = make_test_dir(&["movie.7z.001", "movie.7z.002", "movie.7z.003"]);
+        let results = find_archives(dir.path());
+        // Only the first volume (.001) should be returned
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, ArchiveType::SevenZip);
+        assert!(
+            results[0]
+                .1
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".7z.001"),
+        );
+    }
+
+    #[test]
+    fn test_cleanup_split_7z_volumes() {
+        assert!(is_cleanup_candidate("archive.7z"));
+        assert!(is_cleanup_candidate("archive.7z.001"));
+        assert!(is_cleanup_candidate("archive.7z.002"));
+        assert!(is_cleanup_candidate("archive.7z.099"));
+        assert!(!is_cleanup_candidate("movie.mkv"));
+    }
+
+    #[test]
+    fn test_find_cleanup_includes_split_7z() {
+        let dir = make_test_dir(&[
+            "movie.7z.001",
+            "movie.7z.002",
+            "movie.7z.003",
+            "movie.mkv", // should NOT be cleaned up
+        ]);
+        let results = find_cleanup_files(dir.path());
+        assert_eq!(
+            results.len(),
+            3,
+            "Expected 3 split 7z cleanup files, got: {results:?}"
+        );
+        for path in &results {
+            let name = path.file_name().unwrap().to_str().unwrap();
+            assert!(!name.ends_with(".mkv"));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RAR volume filename parser
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_rar_volume_new_style() {
+        let v = parse_rar_volume("movie.part001.rar").unwrap();
+        assert_eq!(v.set_name, "movie");
+        assert_eq!(v.volume_number, 0);
+
+        let v = parse_rar_volume("movie.part002.rar").unwrap();
+        assert_eq!(v.set_name, "movie");
+        assert_eq!(v.volume_number, 1);
+
+        let v = parse_rar_volume("My.Movie.2024.part015.rar").unwrap();
+        assert_eq!(v.set_name, "My.Movie.2024");
+        assert_eq!(v.volume_number, 14);
+    }
+
+    #[test]
+    fn test_parse_rar_volume_old_style() {
+        let v = parse_rar_volume("archive.rar").unwrap();
+        assert_eq!(v.set_name, "archive");
+        assert_eq!(v.volume_number, 0);
+
+        let v = parse_rar_volume("archive.r00").unwrap();
+        assert_eq!(v.set_name, "archive");
+        assert_eq!(v.volume_number, 1);
+
+        let v = parse_rar_volume("archive.r01").unwrap();
+        assert_eq!(v.set_name, "archive");
+        assert_eq!(v.volume_number, 2);
+
+        let v = parse_rar_volume("archive.r99").unwrap();
+        assert_eq!(v.set_name, "archive");
+        assert_eq!(v.volume_number, 100);
+
+        let v = parse_rar_volume("archive.s00").unwrap();
+        assert_eq!(v.set_name, "archive");
+        assert_eq!(v.volume_number, 101);
+    }
+
+    #[test]
+    fn test_parse_rar_volume_non_rar() {
+        assert!(parse_rar_volume("movie.mkv").is_none());
+        assert!(parse_rar_volume("movie.par2").is_none());
+        assert!(parse_rar_volume("movie.7z").is_none());
+        assert!(parse_rar_volume("movie.zip").is_none());
+        assert!(parse_rar_volume("readme.txt").is_none());
+    }
+
+    #[test]
+    fn parse_rar_volume_does_not_panic_on_multibyte_names() {
+        assert!(parse_rar_volume("テスト").is_none());
+        assert!(parse_rar_volume("file.日本").is_none());
+        assert!(parse_rar_volume(".r0").is_none());
+        assert!(parse_rar_volume(".r00").is_none());
+        assert!(parse_rar_volume("r0").is_none());
+        assert!(parse_rar_volume("").is_none());
+        let v = parse_rar_volume("İSTANBUL.part01.rar").unwrap();
+        assert_eq!(v.set_name, "İSTANBUL");
+        assert_eq!(v.volume_number, 0);
+    }
+
+    #[test]
+    fn test_parse_rar_volume_rejects_letters_before_r() {
+        // Old-style continuation volumes run .r00-.r99, .s00-.s99, ... .z99.
+        // Anything a-q is an unrelated extension (N64 ROM, AC-3 audio, ...)
+        // and must neither be parsed as a volume nor panic on underflow.
+        for name in ["Game.n64", "clip.a52", "x.c01", "disk.d64", "tape.q99"] {
+            assert!(
+                parse_rar_volume(name).is_none(),
+                "{name} is not a RAR volume"
+            );
+        }
+
+        let v = parse_rar_volume("archive.t00").unwrap();
+        assert_eq!(v.volume_number, 201);
+        let v = parse_rar_volume("archive.z99").unwrap();
+        assert_eq!(v.volume_number, 900);
+    }
+
+    #[test]
+    fn test_find_archives_ignores_non_rar_letter_extensions() {
+        let dir = make_test_dir(&["Game.n64", "clip.a52", "x.c01", "movie.mkv"]);
+        assert!(find_archives(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn test_parse_rar_volume_case_insensitive() {
+        let v = parse_rar_volume("Movie.Part003.RAR").unwrap();
+        assert_eq!(v.set_name, "Movie");
+        assert_eq!(v.volume_number, 2);
+
+        let v = parse_rar_volume("ARCHIVE.R05").unwrap();
+        assert_eq!(v.set_name, "ARCHIVE");
+        assert_eq!(v.volume_number, 6);
+    }
+
+    #[test]
+    fn test_parse_rar_volume_preserves_original_set_name() {
+        let v = parse_rar_volume("My.Movie.2024.1080p.part001.rar").unwrap();
+        assert_eq!(v.set_name, "My.Movie.2024.1080p");
+    }
+}

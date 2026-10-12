@@ -1,0 +1,54 @@
+#
+# Local-only Docker build for rustnzb.
+# Uses this repo as the build context so the vendored workspace crates resolve
+# directly, including uncommitted changes.
+#
+# Build:
+#   cd ~/Working/Active/apps/rustnzbd
+#   docker build -f Dockerfile.local \
+#       --build-arg GIT_AUTH_TOKEN="$TOKEN" \
+#       -t rustnzb:local .
+#
+FROM rust:1.88-alpine3.21 AS builder
+
+RUN apk add --no-cache musl-dev build-base protoc openssl-dev openssl-libs-static curl nodejs npm git
+
+WORKDIR /build
+
+# Frontend deps (cached layer)
+COPY apps/rustnzb/frontend/package.json apps/rustnzb/frontend/package-lock.json /build/apps/rustnzb/frontend/
+RUN cd /build/apps/rustnzb/frontend && npm ci
+
+# Frontend build
+COPY apps/rustnzb/frontend /build/apps/rustnzb/frontend
+RUN cd /build/apps/rustnzb/frontend && npx ng build --configuration=production
+
+# Rust source
+COPY Cargo.toml Cargo.lock /build/
+COPY apps/rustnzb/Cargo.toml apps/rustnzb/build.rs /build/apps/rustnzb/
+COPY apps/rustnzb/src /build/apps/rustnzb/src
+COPY crates /build/crates
+
+ARG RUSTNZB_BUILD_REF
+ARG CI_COMMIT_SHA
+ARG CI_COMMIT_TAG
+ENV RUSTNZB_BUILD_REF=${RUSTNZB_BUILD_REF}
+ENV CI_COMMIT_SHA=${CI_COMMIT_SHA}
+ENV CI_COMMIT_TAG=${CI_COMMIT_TAG}
+RUN cargo build --release -p rustnzb --features webdav
+
+
+FROM lscr.io/linuxserver/baseimage-alpine:3.21
+
+RUN apk add --no-cache \
+        ca-certificates \
+        curl \
+        7zip
+
+COPY --from=builder /build/target/release/rustnzb /usr/local/bin/rustnzb
+
+COPY apps/rustnzb/root/ /
+
+EXPOSE 9090
+
+VOLUME ["/config", "/data", "/downloads"]

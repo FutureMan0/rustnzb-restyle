@@ -16,22 +16,17 @@ test.describe('Smoke Tests', () => {
 
   test('app loads with tabs', async ({ page }) => {
     await page.goto('/');
-    await expect(page).toHaveURL(/\/queue/);
+    await expect(page).toHaveURL(/\/downloads/);
     await expect(page.locator('.brand')).toBeVisible();
-    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
-    await expect(page.getByRole('link', { name: 'Queue' })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'History' })).toBeVisible();
+    // All tabs visible
+    await expect(page.getByRole('link', { name: 'Downloads' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Search' })).toBeVisible();
     await expect(page.getByRole('link', { name: 'Settings' })).toBeVisible();
-    if (wide) {
-      await expect(page.getByRole('link', { name: 'Logs' })).toBeVisible();
-    } else {
-      await expect(page.locator('.app-bottom-nav')).toBeVisible();
-    }
+    await expect(page.getByRole('link', { name: 'Logs' })).toBeVisible();
   });
 
   test('queue tab shows seeded jobs', async ({ page }) => {
-    await page.goto('/queue');
+    await page.goto('/downloads');
     await expect(page.getByText('Test.Movie.2025.mkv')).toBeVisible();
     await expect(page.getByText('Another.Show.S01E01')).toBeVisible();
   });
@@ -86,8 +81,8 @@ test.describe('Smoke Tests', () => {
   });
 
   test('history tab loads', async ({ page }) => {
-    await page.goto('/history');
-    await expect(page.locator('h3', { hasText: 'Download History' })).toBeVisible();
+    await page.goto('/downloads?tab=history');
+    await expect(page.locator('h3', { hasText: 'History' }).first()).toBeVisible();
   });
 
   test('logs tab loads', async ({ page }) => {
@@ -99,35 +94,20 @@ test.describe('Smoke Tests', () => {
   });
 
   test('tabs navigate correctly', async ({ page }) => {
-    await page.goto('/queue');
+    await page.goto('/downloads');
     await page.getByRole('link', { name: 'Search' }).click();
     await expect(page).toHaveURL(/\/groups/);
     await page.getByRole('link', { name: 'Settings' }).click();
     await expect(page).toHaveURL(/\/settings/);
-    await page.getByRole('link', { name: 'Queue' }).click();
-    await expect(page).toHaveURL(/\/queue/);
+    await page.getByRole('link', { name: 'Downloads' }).click();
+    await expect(page).toHaveURL(/\/downloads/);
   });
 
   test('status bar shows info', async ({ page }) => {
     await page.goto('/');
-    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
-    if (wide) {
-      await expect(page.locator('.app-topbar--live')).toBeVisible();
-      await expect(page.locator('.app-topbar--live .live-dot')).toBeVisible();
-    } else {
-      await expect(page.locator('.app-topbar .brand')).toBeVisible();
-    }
-  });
-
-  test('settings display offers OLED', async ({ page }) => {
-    await page.goto('/settings');
-    const wide = (await page.viewportSize()?.width ?? 1200) >= 1024;
-    if (!wide) {
-      await page.locator('#settingsTab').selectOption('display');
-    } else {
-      await page.getByRole('button', { name: 'Display' }).click();
-    }
-    await expect(page.getByText('OLED (Pure Black)')).toBeVisible();
+    // Status pills: "Daemon running" or "Paused", speed, queue count, disk space
+    await expect(page.locator('.pill').first()).toBeVisible();
+    await expect(page.locator('.pill', { hasText: /Daemon running|Paused/ })).toBeVisible();
   });
 
   test('groups API returns seeded data', async ({ request }) => {

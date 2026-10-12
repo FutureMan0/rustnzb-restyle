@@ -1,72 +1,88 @@
 # syntax=docker/dockerfile:1.7
-FROM rust:1.88-alpine3.21 AS builder
 
-RUN apk add --no-cache musl-dev build-base g++ protoc openssl-dev openssl-libs-static curl nodejs npm git
+ARG CROSS_IMAGE=repo.indexarr.net/indexarr/rustnzb-ci-cross@sha256:89f1f570acb0f8e6514ffcca39bd9f26305263d95274e4c170eedf867d113ad9
+ARG UNRAR_VERSION=7.2.3
+ARG UNRAR_SHA256=3995af0aa32b1505a566da053725551a1f0698dc42b2fdf7ba7d65db0d004e33
+
+FROM alpine:3.23 AS unrar-builder
+
+ARG UNRAR_VERSION
+ARG UNRAR_SHA256
+
+RUN apk add --no-cache build-base curl \
+    && curl -fsSLo /tmp/unrar.tar.gz \
+        "https://www.rarlab.com/rar/unrarsrc-${UNRAR_VERSION}.tar.gz" \
+    && echo "${UNRAR_SHA256}  /tmp/unrar.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/unrar.tar.gz -C /tmp \
+    && make -C /tmp/unrar -j"$(getconf _NPROCESSORS_ONLN)" \
+    && install -Dm755 /tmp/unrar/unrar /out/unrar
+
+FROM --platform=$BUILDPLATFORM ${CROSS_IMAGE} AS builder
+
+ARG TARGETPLATFORM
+ARG RUSTNZB_BUILD_REF=local
+ARG RELEASE_OPTIMIZED=false
 
 WORKDIR /build
 
-# Install Angular dependencies first (cached layer)
-COPY frontend/package.json frontend/package-lock.json frontend/
-RUN --mount=type=cache,target=/root/.npm \
-    cd frontend && npm ci --no-audit --no-fund
+# Install and build the frontend only from its declared source and lockfile.
+# Host node_modules, Angular output, and stale dist trees are excluded by
+# .dockerignore and therefore cannot affect the runtime image.
+COPY apps/rustnzb/frontend/package.json apps/rustnzb/frontend/package-lock.json apps/rustnzb/frontend/
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm --prefix apps/rustnzb/frontend ci --no-audit --no-fund
+COPY apps/rustnzb/frontend apps/rustnzb/frontend
+RUN npm --prefix apps/rustnzb/frontend run build -- --configuration=production \
+    && test -s apps/rustnzb/frontend/dist/frontend/browser/index.html
 
-# Copy frontend source and build
-COPY frontend frontend
-RUN cd frontend && npx ng build --configuration=production
+# Cargo manifests and sources are copied only after the frontend dependency
+# layer so ordinary application edits do not invalidate npm downloads.
+COPY Cargo.toml Cargo.lock ./
+COPY apps apps
+COPY crates crates
 
-# Copy Rust source + local crate patches
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY src src
-COPY patches patches
-
-# Configure git + cargo registry for private Forgejo deps
-ARG GIT_AUTH_TOKEN
-ARG PLUGIN_PASSWORD
-RUN TOKEN="${GIT_AUTH_TOKEN:-$PLUGIN_PASSWORD}" && \
-    if [ -n "$TOKEN" ]; then \
-      git config --global url."http://x-access-token:${TOKEN}@100.92.54.45:3002/".insteadOf "http://100.92.54.45:3002/" && \
-      printf '[registries.forgejo]\nindex = "sparse+https://repo.indexarr.net/api/packages/indexarr/cargo/"\ncredential-provider = "cargo:token"\n' > $CARGO_HOME/config.toml && \
-      printf '[registries.forgejo]\ntoken = "Bearer %s"\n' "$TOKEN" > $CARGO_HOME/credentials.toml; \
-    else \
-      echo "No Forgejo token provided; using crates.io defaults"; \
-    fi
-# Note: [patch.crates-io] is intentionally kept for the nzb-postproc fix
-
-# RELEASE_OPTIMIZED=true enables fat LTO + single codegen-unit (slow but smaller binary)
-ARG RELEASE_OPTIMIZED=false
-
-# Build Rust binary (build.rs skips ng build since dist already exists)
+# The build uses only public crates.io dependencies for the rustnzb binary.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git/db,sharing=locked \
-    if [ "$RELEASE_OPTIMIZED" = "true" ]; then \
-      export CARGO_PROFILE_RELEASE_LTO=fat \
-             CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-             CARGO_PROFILE_RELEASE_STRIP=symbols; \
-    fi && \
-    cargo build --release --features webdav
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    set -eu; \
+    case "$TARGETPLATFORM" in \
+        linux/amd64) rust_target=x86_64-unknown-linux-musl ;; \
+        linux/arm64) rust_target=aarch64-unknown-linux-musl ;; \
+        *) printf 'unsupported target platform: %s\n' "$TARGETPLATFORM" >&2; exit 1 ;; \
+    esac; \
+    if [ "$RELEASE_OPTIMIZED" = true ]; then \
+        export CARGO_PROFILE_RELEASE_LTO=thin \
+            CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
+            CARGO_PROFILE_RELEASE_STRIP=symbols; \
+    fi; \
+    CARGO_TARGET_DIR=/build/target \
+    RUSTNZB_BUILD_REF="$RUSTNZB_BUILD_REF" \
+        cargo zigbuild --release --locked -p rustnzb \
+            --features webdav,vendored-openssl --target "$rust_target"; \
+    mkdir -p /out; \
+    cp "/build/target/$rust_target/release/rustnzb" /out/rustnzb
 
-# Compile unrar from source (RARLab provides free unrar source)
-RUN curl -fsSL https://www.rarlab.com/rar/unrarsrc-7.1.3.tar.gz | tar xz -C /tmp \
-    && cd /tmp/unrar \
-    && make -j$(nproc) CXX=g++ \
-    && strip unrar
+FROM lscr.io/linuxserver/baseimage-alpine:3.23@sha256:46d690858431e262d574274bb2863e1fbaf8de61c6f7677150dd79c2cc65cdcf AS runtime
 
-
-FROM lscr.io/linuxserver/baseimage-alpine:3.21
+ARG RUSTNZB_BUILD_REF
 
 RUN apk add --no-cache \
+        7zip \
         ca-certificates \
         curl \
-        7zip
+        libgcc \
+        libstdc++
 
-# Copy natively compiled unrar (musl, no gcompat needed)
-COPY --from=builder /tmp/unrar/unrar /usr/local/bin/unrar
+COPY --from=builder /out/rustnzb /usr/local/bin/rustnzb
+COPY --from=unrar-builder /out/unrar /usr/local/bin/unrar
+COPY apps/rustnzb/root/ /
 
-COPY --from=builder /build/target/release/rustnzb /usr/local/bin/rustnzb
-
-# s6 init: create directories and fix permissions
-COPY root/ /
+LABEL org.opencontainers.image.title="rustnzb" \
+      org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/rustnzb" \
+      org.opencontainers.image.revision="$RUSTNZB_BUILD_REF"
 
 EXPOSE 9090
-
 VOLUME ["/config", "/data", "/downloads"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:9090/api/health || exit 1

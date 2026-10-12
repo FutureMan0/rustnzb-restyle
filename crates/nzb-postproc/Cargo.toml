@@ -1,0 +1,39 @@
+[package]
+name = "nzb-postproc"
+version = "0.2.9"
+edition = "2024"
+description = "Post-processing pipeline: PAR2 verify/repair, archive extraction"
+license = "MIT"
+repository = "https://github.com/TheDancingDeveloper-org/nzb-postproc"
+readme = "README.md"
+
+[features]
+default = []
+groups-db = ["nzb-core/groups-db"]
+
+[dependencies]
+nzb-core = { version = "0.2.19", path = "../nzb-core" }
+tokio = { version = "1", features = ["rt", "sync", "process", "io-util"] }
+tracing = "0.1"
+opentelemetry.workspace = true
+anyhow = "1"
+thiserror = "2"
+rust-par2 = "0.1"
+walkdir = "2"
+zip = "8"
+tar.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+# Integration tests synthesise real PAR2 index files (see
+# `tests/support/par2_fixture.rs`), which requires writing spec-correct
+# packet MD5s. Version tracks what `rust-par2` itself parses with.
+md-5 = "0.11"
+crc32fast = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[lints.rust]
+unused = "warn"

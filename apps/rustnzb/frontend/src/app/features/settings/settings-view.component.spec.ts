@@ -1,0 +1,143 @@
+import '@angular/compiler';
+
+import { describe, expect, it, vi } from 'vitest';
+import { of, throwError } from 'rxjs';
+
+import { ApiService } from '../../core/services/api.service';
+import { SettingsViewComponent } from './settings-view.component';
+
+function makeComponent(overrides: Record<string, ReturnType<typeof vi.fn>> = {}) {
+  const api = {
+    get: vi.fn((path: string) => {
+      const values: Record<string, unknown> = {
+        '/config/servers': [],
+        '/config/servers/stats': [],
+        '/config/categories': [],
+        '/config/speed-limit': { speed_limit_bps: 123 },
+        '/config/max-active-downloads': { max_active_downloads: 4 },
+        '/config/history-retention': { retention: 14 },
+        '/config/disk-guards': { min_free_space_bytes: 2 * 1024 ** 3, abort_hopeless: false },
+        '/config/sabnzbd-api-key': { api_key: 'key' },
+        '/status': { webdav_available: false, webdav_enabled: false },
+        '/config': { general: { data_dir: '/data', incomplete_dir: '/incomplete', complete_dir: '/complete', watch_dir: null } },
+      };
+      return of(values[path]);
+    }),
+    post: vi.fn(() => of({ api_key: 'rotated' })),
+    put: vi.fn(() => of({})),
+    delete: vi.fn(() => of({})),
+    ...overrides,
+  };
+  const snack = { open: vi.fn() };
+  const confirm = { confirm: vi.fn(() => of(true)) };
+  const theme = { set: vi.fn() };
+  return {
+    component: new SettingsViewComponent(api as unknown as ApiService, snack as never, confirm as never, theme as never),
+    api,
+    snack,
+    confirm,
+    theme,
+  };
+}
+
+describe('SettingsViewComponent', () => {
+  it('loads server, category, status, directory, and general settings on initialization', () => {
+    const { component, api } = makeComponent();
+    component.ngOnInit();
+
+    expect(api.get).toHaveBeenCalledWith('/config/servers');
+    expect(api.get).toHaveBeenCalledWith('/config/disk-guards');
+    expect(component.speedLimit).toBe(123);
+    expect(component.maxActiveDownloads).toBe(4);
+    expect(component.minFreeSpaceGB).toBe(2);
+    expect(component.abortHopeless).toBe(false);
+    expect(component.dirs()?.complete_dir).toBe('/complete');
+  });
+
+  it('validates a server host before save and clears blank credentials from API payloads', () => {
+    const { component, api, snack } = makeComponent();
+    component.addServer();
+    component.saveServer();
+    expect(api.post).not.toHaveBeenCalled();
+    expect(snack.open).toHaveBeenCalledWith('Host is required', 'Close', { duration: 3000 });
+
+    component.editingServer = { ...component.editingServer!, host: 'news.example', username: '', password: '' };
+    component.saveServer();
+    expect(api.post).toHaveBeenCalledWith('/config/servers', expect.objectContaining({ host: 'news.example', username: null, password: null }));
+  });
+
+  it('surfaces settings save failures and rotates SAB API keys after confirmation', () => {
+    const { component, api, snack, confirm } = makeComponent({
+      put: vi.fn(() => throwError(() => new Error('offline'))),
+    });
+    component.speedLimit = 999;
+    component.saveSpeedLimit();
+    expect(snack.open).toHaveBeenCalledWith('Failed to save speed limit', 'Close', { duration: 5000 });
+
+    component.rotateSabApiKey();
+    expect(confirm.confirm).toHaveBeenCalledWith(expect.objectContaining({ title: 'Generate SABnzbd API key?' }));
+    expect(api.post).toHaveBeenCalledWith('/config/sabnzbd-api-key/rotate', {});
+    expect(component.sabApiKey).toBe('rotated');
+    expect(component.showSabApiKey).toBe(true);
+  });
+
+  it('saves general engine settings through /config/general with only known fields', () => {
+    const { component, api, snack } = makeComponent();
+    component.maxPostProcessingJobs = 3;
+    component.maxRepairWorkers = 2;
+    component.maxExtractWorkers = 2;
+    component.savePostprocWorkers();
+    expect(api.put).toHaveBeenCalledWith('/config/general', {
+      max_post_processing_jobs: 3,
+      max_repair_workers: 2,
+      max_extract_workers: 2,
+    });
+
+    component.directUnpack = false;
+    component.maxNestedArchiveDepth = 2;
+    component.saveExtraction();
+    expect(api.put).toHaveBeenCalledWith('/config/general', { direct_unpack: false, max_nested_archive_depth: 2 });
+
+    // Out-of-range values are rejected client-side.
+    api.put.mockClear();
+    component.maxNestedArchiveDepth = 11;
+    component.saveExtraction();
+    expect(api.put).not.toHaveBeenCalled();
+    expect(snack.open).toHaveBeenCalledWith(
+      'Nested archive depth must be a whole number between 0 and 10',
+      'Close',
+      { duration: 3000 },
+    );
+
+    // Blank RSS fields are omitted (null would mean "unchanged", 0 would prune everything).
+    component.rssHistoryLimit = null;
+    component.rssExpiryDays = 30;
+    component.saveRssSettings();
+    expect(api.put).toHaveBeenCalledWith('/config/general', { rss_downloaded_item_expiry_days: 30 });
+  });
+
+  it('keeps stored server passwords when editing with a blank password', () => {
+    const { component, api } = makeComponent();
+    component.editServer({ id: 's1', host: 'news.example', password: '********' } as never);
+    expect(component.editingServer?.password).toBe('');
+    component.saveServer();
+    expect(api.put).toHaveBeenCalledWith('/config/servers/s1', expect.objectContaining({ password: '********' }));
+  });
+
+  it('shows the server explanation when a settings save is rejected', () => {
+    const { component, snack } = makeComponent({
+      put: vi.fn(() =>
+        throwError(() => ({
+          status: 400,
+          error: { error_kind: 'bad_request', human_readable: 'speed_limit_bps must be >= 0', status: 400 },
+        })),
+      ),
+    });
+    component.saveSpeedLimit();
+    expect(snack.open).toHaveBeenCalledWith(
+      'Failed to save speed limit: speed_limit_bps must be >= 0',
+      'Close',
+      { duration: 5000 },
+    );
+  });
+});

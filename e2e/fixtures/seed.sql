@@ -15,16 +15,19 @@ VALUES
   (5, 1, 5, 'Binary File [3/3]',  'poster@news',    '2026-03-02 09:02:00', 'bin3@test', '',       2048000, 5000);
 
 -- ── Queue (paused jobs for queue UI tests) ────────────────────────────────────
+-- Keep the deterministic queue from being consumed before Playwright reaches it.
+INSERT INTO settings (key, value) VALUES ('globally_paused', 'true');
+
 INSERT INTO queue (id, name, category, status, priority, total_bytes, downloaded_bytes,
-                   file_count, article_count, added_at, work_dir, output_dir)
+                   file_count, article_count, articles_failed, added_at, work_dir, output_dir)
 VALUES
   ('queue-job-1', 'Test.Movie.2025.mkv', 'movies', 'paused', 1,
-   1073741824, 536870912, 3, 300,
+   1073741824, 536870912, 3, 300, 7,
    '2026-03-01T10:00:00Z',
    'e2e/test-data/incomplete/queue-job-1',
    'e2e/test-data/complete/movies/Test.Movie.2025.mkv'),
   ('queue-job-2', 'Another.Show.S01E01', 'tv', 'queued', 2,
-   524288000, 0, 2, 150,
+   524288000, 0, 2, 150, 0,
    '2026-03-01T11:00:00Z',
    'e2e/test-data/incomplete/queue-job-2',
    'e2e/test-data/complete/tv/Another.Show.S01E01');
@@ -39,7 +42,7 @@ VALUES
    '2026-03-01T08:00:00Z', '2026-03-01T09:30:00Z',
    'e2e/test-data/complete/movies/Completed.Movie.2025.mkv',
    '[{"name":"Download","status":"completed","detail":"2.0 GB in 90m"},{"name":"Verify","status":"completed","detail":"All OK"},{"name":"Extract","status":"completed","detail":"Extracted 1 file"}]',
-   NULL, '[]', '[]'),
+   NULL, '[{"server_id":"seed-server","server_name":"Seed News","articles_downloaded":1998,"articles_failed":2,"bytes_downloaded":2147483648}]', '[]'),
 
   ('hist-failed-1', 'Failed.Show.S02E05.mkv', 'tv', 'failed',
    1073741824, 524288000,
@@ -47,14 +50,25 @@ VALUES
    'e2e/test-data/complete/tv/Failed.Show.S02E05.mkv',
    '[{"name":"Download","status":"completed","detail":"500 MB"},{"name":"Verify","status":"failed","detail":"Par2 repair failed"}]',
    'Article not found on server: test-msg@test.com',
-   '[]', '[]'),
+   '[{"server_id":"seed-server","server_name":"Seed News","articles_downloaded":450,"articles_failed":50,"bytes_downloaded":524288000}]', '[]'),
 
   ('hist-completed-2', 'Good.Podcast.EP100.mp3', 'Default', 'completed',
    52428800, 52428800,
    '2026-03-03T07:00:00Z', '2026-03-03T07:05:00Z',
    'e2e/test-data/complete/Default/Good.Podcast.EP100.mp3',
    '[{"name":"Download","status":"completed","detail":"50 MB"}]',
-   NULL, '[]', '[]');
+   NULL, '[{"server_id":"seed-server","server_name":"Seed News","articles_downloaded":100,"articles_failed":0,"bytes_downloaded":52428800}]', '[]');
+
+INSERT INTO download_statistics (job_id, completed_at, status, total_bytes,
+                                 downloaded_bytes, duration_secs, average_speed_bps,
+                                 server_stats)
+SELECT id, completed_at, status, total_bytes, downloaded_bytes,
+       MAX(0, (julianday(completed_at) - julianday(added_at)) * 86400.0),
+       CASE WHEN julianday(completed_at) > julianday(added_at)
+            THEN CAST(downloaded_bytes / ((julianday(completed_at) - julianday(added_at)) * 86400.0) AS INTEGER)
+            ELSE 0 END,
+       server_stats
+FROM history;
 
 -- ── RSS items ─────────────────────────────────────────────────────────────────
 INSERT INTO rss_items (id, feed_name, title, url, published_at, first_seen_at,

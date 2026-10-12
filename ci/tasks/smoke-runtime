@@ -1,0 +1,126 @@
+#!/bin/sh
+set -eu
+. "$(dirname "$0")/lib.sh"
+task_start smoke-runtime docker curl
+
+image=${1:?usage: ci/tasks/smoke-runtime IMAGE [EXPECTED_REF]}
+expected_ref=${2:-${RUSTNZB_EXPECTED_REF:-}}
+name="rustnzb-smoke-$$"
+network=
+probe_image=curlimages/curl:8.17.0
+work=$(mktemp -d)
+logs=$REPO_ROOT/.ci-artifacts/runtime-smoke
+docker_config=
+rm -rf "$logs"
+mkdir -p "$logs"
+
+cleanup() {
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    [ -z "$network" ] || docker network rm "$network" >/dev/null 2>&1 || true
+    rm -rf "$work"
+    [ -z "$docker_config" ] || rm -rf "$docker_config"
+}
+trap cleanup EXIT
+
+if [ -n "${GIT_AUTH_TOKEN:-}" ]; then
+    docker_config=$(mktemp -d)
+    export DOCKER_CONFIG=$docker_config
+    printf '%s' "$GIT_AUTH_TOKEN" | docker login repo.indexarr.net \
+        --username x-access-token --password-stdin >/dev/null
+fi
+
+docker pull "$image" >/dev/null 2>&1 || true
+docker run --rm --entrypoint /usr/local/bin/rustnzb "$image" --smoke-test
+caller=${HOSTNAME:-$(hostname)}
+caller_network=$(docker inspect "$caller" \
+    --format '{{range $name, $network := .NetworkSettings.Networks}}{{if $network.IPAddress}}{{println $name}}{{end}}{{end}}' \
+    2>/dev/null | sed -n '1p' || true)
+remote_docker=false
+case "${DOCKER_HOST:-}" in
+    tcp://*) remote_docker=true ;;
+esac
+if [ -n "$caller_network" ]; then
+    docker run -d --name "$name" \
+        -e PUID="$(id -u)" -e PGID="$(id -g)" \
+        --network "$caller_network" \
+        --tmpfs /config \
+        --tmpfs /data \
+        --tmpfs /downloads \
+        "$image" >/dev/null
+    address=$(docker inspect "$name" \
+        --format "{{with index .NetworkSettings.Networks \"$caller_network\"}}{{.IPAddress}}{{end}}")
+    [ -n "$address" ]
+    base_url=http://$address:9090
+elif [ "$remote_docker" = true ]; then
+    network="rustnzb-smoke-net-$$"
+    docker network create "$network" >/dev/null
+    docker run -d --name "$name" \
+        -e PUID="$(id -u)" -e PGID="$(id -g)" \
+        --network "$network" \
+        --tmpfs /config \
+        --tmpfs /data \
+        --tmpfs /downloads \
+        "$image" >/dev/null
+    base_url=http://$name:9090
+else
+    docker run -d --name "$name" \
+        -e PUID="$(id -u)" -e PGID="$(id -g)" \
+        -p 127.0.0.1::9090 \
+        --tmpfs /config \
+        --tmpfs /data \
+        --tmpfs /downloads \
+        "$image" >/dev/null
+    port=$(docker port "$name" 9090/tcp | sed -n 's/.*://p' | head -n 1)
+    [ -n "$port" ]
+    base_url=http://127.0.0.1:$port
+fi
+
+http_get() {
+    if [ "$remote_docker" = true ] && [ -z "$caller_network" ]; then
+        docker run --rm --network "$network" "$probe_image" -fsS "$1"
+    else
+        curl -fsS "$1"
+    fi
+}
+
+ready=false
+attempt=0
+# A failed curl within a function can cause some /bin/sh implementations to
+# honour `set -e` before the surrounding `if` sees the result.  Temporarily
+# handle the probe status explicitly so a cold s6 service gets its full
+# readiness window.
+set +e
+while [ "$attempt" -lt 90 ]; do
+    http_get "$base_url/api/health" >"$work/health.json" 2>"$work/health.err"
+    probe_status=$?
+    if [ "$probe_status" -eq 0 ]; then
+        ready=true
+        break
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+done
+set -e
+if [ "$ready" != true ]; then
+    docker logs "$name" >"$logs/container.log" 2>&1 || true
+    docker inspect "$name" >"$logs/container-inspect.json" 2>&1 || true
+    cp "$work/health.err" "$logs/health.err" 2>/dev/null || true
+    printf 'runtime did not become healthy; logs retained in %s\n' "$logs" >&2
+    exit 1
+fi
+grep -q '"status":"ok"' "$work/health.json"
+http_get "$base_url/" >"$work/frontend.html"
+grep -Eq '<app-root|<html' "$work/frontend.html"
+setup=$(http_get "$base_url/api/setup/status")
+if [ -n "$expected_ref" ]; then
+    printf '%s' "$setup" | grep -Fq "$expected_ref"
+fi
+docker exec "$name" 7z i >/dev/null
+docker exec "$name" unrar >/dev/null 2>&1 || [ "$?" -eq 7 ]
+rar_smoke='UmFyIRoHAQAzkrXlCgEFBgAFAQGAgACMe8YhPAIDC5IABJIApIMC3gHLb4AAAR50bXAvdG1wLkNTZUZSbEhxZkkvcGF5bG9hZC50eHQKAxPkjmBqAU1HMnJ1c3RuemIgcmFyIHNtb2tlCh13VlEDBQQA'
+printf '%s' "$rar_smoke" | base64 -d | docker exec -i "$name" sh -c 'cat >/tmp/rustnzb-smoke.rar'
+docker exec "$name" unrar t -inul /tmp/rustnzb-smoke.rar
+docker stop --time 15 "$name" >/dev/null
+docker wait "$name" >/dev/null 2>&1 || true
+rm -rf "$logs"
+printf 'runtime smoke test passed for %s\n' "$image"

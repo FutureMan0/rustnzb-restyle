@@ -49,19 +49,20 @@ jobs:
             type=ref,event=tag
 
       - name: Build (and push)
-        uses: docker/build-push-action@v6
+        uses: docker/bake-action@v6
+        env:
+          PLATFORMS: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          RELEASE_OPTIMIZED: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'true' || 'false' }}
+          RUSTNZB_BUILD_REF: ${{ github.sha }}
         with:
-          context: .
-          file: ./Dockerfile
-          platforms: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          source: .
+          files: |
+            ./docker-bake.hcl
+            cwd://${{ steps.meta.outputs.bake-file }}
+          targets: rustnzb
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: |
-            type=gha,scope=rustnzb-main
-            type=gha,scope=rustnzb-${{ github.ref_name }}
-          cache-to: type=gha,scope=rustnzb-${{ github.ref_name }},mode=max
-          build-args: |
-            RELEASE_OPTIMIZED=${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && 'true' || 'false' }}
-            GIT_AUTH_TOKEN=${{ secrets.FORGEJO_TOKEN }}
-            PLUGIN_PASSWORD=${{ secrets.FORGEJO_TOKEN }}
+          set: |
+            cross-toolchain.cache-from=type=gha,scope=cross-toolchain
+            cross-toolchain.cache-to=type=gha,scope=cross-toolchain,mode=max
+            rustnzb.cache-from=type=gha,scope=rustnzb-${{ github.ref_name }}
+            rustnzb.cache-to=type=gha,scope=rustnzb-${{ github.ref_name }},mode=max

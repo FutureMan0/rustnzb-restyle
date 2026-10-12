@@ -30,12 +30,16 @@ export async function startBackend(opts: {
   if (fs.existsSync(absoluteDataDir)) fs.rmSync(absoluteDataDir, { recursive: true });
   fs.mkdirSync(path.join(absoluteDataDir, 'incomplete'), { recursive: true });
   fs.mkdirSync(path.join(absoluteDataDir, 'complete'), { recursive: true });
+  // The backend persists API/auth changes to its config file. Always run from
+  // a disposable copy so an E2E run cannot modify tracked fixtures.
+  const runtimeConfig = path.join(absoluteDataDir, 'config.toml');
+  fs.copyFileSync(path.join(PROJECT_ROOT, config), runtimeConfig);
 
   if (seedFile) {
     // Phase 1: start backend briefly so it runs migrations, then stop it.
     // The queue manager loads its in-memory state from DB at startup, so we
     // must seed the DB BEFORE the final start so seeded queue jobs are visible.
-    const proc1 = spawnBackend(name, port, config);
+    const proc1 = spawnBackend(name, port, runtimeConfig);
     await waitForHealthy(`http://localhost:${port}/api/health`, 15000);
     // Wait for WAL checkpoint before killing
     await new Promise(r => setTimeout(r, 600));
@@ -65,26 +69,33 @@ export async function startBackend(opts: {
     if (lastErr) throw lastErr;
 
     // Phase 2: restart with seeded data — queue manager will load seeded jobs
-    const proc2 = spawnBackend(name, port, config);
+    const proc2 = spawnBackend(name, port, runtimeConfig);
     await waitForHealthy(`http://localhost:${port}/api/health`, 15000);
-    instances.set(name, { process: proc2, port, config, dataDir: absoluteDataDir, dbPath });
+    instances.set(name, { process: proc2, port, config: runtimeConfig, dataDir: absoluteDataDir, dbPath });
   } else {
-    const proc = spawnBackend(name, port, config);
+    const proc = spawnBackend(name, port, runtimeConfig);
     await waitForHealthy(`http://localhost:${port}/api/health`, 15000);
-    instances.set(name, { process: proc, port, config, dataDir: absoluteDataDir, dbPath });
+    instances.set(name, { process: proc, port, config: runtimeConfig, dataDir: absoluteDataDir, dbPath });
   }
 }
 
 function spawnBackend(name: string, port: number, config: string): ChildProcess {
-  const binary = path.join(PROJECT_ROOT, 'target/debug/rustnzb');
+  const binary = process.env.RUSTNZB_E2E_BINARY ?? path.join(PROJECT_ROOT, 'target/debug/rustnzb');
   const proc = spawn(binary, ['--config', config], {
     cwd: PROJECT_ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  const logDir = process.env.RUSTNZB_E2E_LOG_DIR;
+  const log = logDir
+    ? fs.createWriteStream(path.join(logDir, `backend-${name}.log`), { flags: 'a' })
+    : null;
+  proc.stdout?.on('data', (data: Buffer) => log?.write(data));
   proc.stderr?.on('data', (data: Buffer) => {
     const msg = data.toString();
+    log?.write(data);
     if (msg.includes('ERROR')) process.stderr.write(`[backend:${name}] ${msg}`);
   });
+  proc.once('exit', () => log?.end());
   return proc;
 }
 
@@ -112,8 +123,10 @@ export function cleanAllBackendData(): void {
   // Also clean any leftover data dirs
   const mainDir = path.join(PROJECT_ROOT, 'e2e/test-data');
   const freshDir = path.join(PROJECT_ROOT, 'e2e/test-data-fresh');
-  rmDirWithRetries(mainDir);
-  rmDirWithRetries(freshDir);
+  const mockDir = path.join(PROJECT_ROOT, 'e2e/test-data-mock');
+  if (fs.existsSync(mainDir)) fs.rmSync(mainDir, { recursive: true });
+  if (fs.existsSync(freshDir)) fs.rmSync(freshDir, { recursive: true });
+  if (fs.existsSync(mockDir)) fs.rmSync(mockDir, { recursive: true });
 }
 
 async function waitForHealthy(url: string, timeoutMs: number): Promise<void> {
@@ -126,24 +139,4 @@ async function waitForHealthy(url: string, timeoutMs: number): Promise<void> {
     await new Promise(r => setTimeout(r, 200));
   }
   throw new Error(`Backend not healthy within ${timeoutMs}ms: ${url}`);
-}
-
-function rmDirWithRetries(dir: string): void {
-  if (!fs.existsSync(dir)) return;
-  const attempts = 8;
-  for (let i = 0; i < attempts; i++) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 });
-      return;
-    } catch (err) {
-      // Windows can temporarily lock sqlite/db files right after process exit.
-      // Give the OS a moment, then retry.
-      if (i === attempts - 1) throw err;
-      const waitMs = 120 * (i + 1);
-      const end = Date.now() + waitMs;
-      while (Date.now() < end) {
-        // busy-wait: teardown is synchronous by design
-      }
-    }
-  }
 }

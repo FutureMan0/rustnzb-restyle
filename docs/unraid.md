@@ -4,7 +4,7 @@ Dieses Repo baut ein Docker-Image nach **GHCR** (GitHub Container Registry). Unr
 
 ### 1) Image / Tag
 
-- **Image**: `ghcr.io/<DEIN_GHCR_OWNER>/rustnzb-restyle`
+- **Image**: `ghcr.io/futureman0/rustnzb-restyle`
 - **Tag**: `latest` (empfohlen für „immer neuestes“) oder ein `vX.Y.Z` Tag (wenn du Releases taggst)
 
 Wenn du dieses Repo unter `FutureMan0` verwendest, ist der Owner typischerweise `FutureMan0`.

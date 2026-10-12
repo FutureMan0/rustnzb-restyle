@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+. "$(dirname "$0")/lib.sh"
+trap cleanup_frontend EXIT
+task_start test cargo
+task_target_dir test
+prepare_placeholder_frontend
+cargo test --workspace --all-targets --locked
+cargo test -p rustnzb --features webdav --lib --locked
+CARGO_TARGET_DIR="$REPO_ROOT/.ci-output/targets/benchnzb-test" \
+    cargo test --manifest-path benchnzb/Cargo.toml --all-targets --locked
+show_sccache_stats

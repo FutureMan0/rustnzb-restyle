@@ -5,6 +5,7 @@
 
 export const MAIN_URL = 'http://localhost:9190';
 export const FRESH_URL = 'http://localhost:9191';
+export const MOCK_URL = 'http://localhost:9192';
 
 export const TEST_USER = 'testadmin';
 export const TEST_PASS = 'testpassword123';
@@ -60,10 +61,10 @@ export async function apiAddServer(baseUrl: string, token: string, server?: Part
     priority: server?.priority ?? 0,
     enabled: server?.enabled ?? true,
     retention: server?.retention ?? 0,
-    pipelining: server?.pipelining ?? 16,
+    pipelining: server?.pipelining ?? 4,
     optional: server?.optional ?? false,
     compress: server?.compress ?? false,
-    ramp_up_delay_ms: server?.ramp_up_delay_ms ?? 0,
+    ramp_up_delay_ms: server?.ramp_up_delay_ms ?? 50,
     proxy_url: null,
     trusted_fingerprint: null,
   };

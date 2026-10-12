@@ -94,15 +94,15 @@ test.describe.serial('First boot', () => {
     storedToken = capturedToken;
   });
 
-  // ── 1.4 Welcome skip → /queue ───────────────────────────────────────────────
-  test('1.4 welcome skip goes to queue', async ({ page }) => {
+  // ── 1.4 Welcome skip → /downloads ───────────────────────────────────────────
+  test('1.4 welcome skip goes to downloads', async ({ page }) => {
     await injectToken(page, storedToken);
     await page.goto('/welcome');
 
     await expect(page.getByRole('heading', { name: 'Welcome to rustnzb' })).toBeVisible();
     await page.getByText(/skip for now/i).click();
 
-    await expect(page).toHaveURL(/\/queue/);
+    await expect(page).toHaveURL(/\/downloads/);
     await expect(page.getByText(/no downloads in queue/i)).toBeVisible();
   });
 
@@ -120,7 +120,7 @@ test.describe.serial('First boot', () => {
 
   // ── 1.6 Welcome shows welcome page when no servers are configured ──────────
   // The fresh backend has no servers, so navigating to /welcome should stay on
-  // the welcome page rather than auto-redirecting to /queue.
+  // the welcome page rather than auto-redirecting to /downloads.
   test('1.6 welcome page shown when no servers configured', async ({ page }) => {
     await injectToken(page, storedToken);
     await page.goto('/welcome');
@@ -156,7 +156,9 @@ test.describe.serial('First boot', () => {
     await page.getByRole('button', { name: 'Import from SABnzbd' }).click();
     await expect(page.getByRole('button', { name: /live instance/i })).toBeVisible();
 
-    // Fill in an unreachable URL and a dummy API key
+    // A loopback URL. The fetch guard refuses private addresses before any
+    // connection attempt, and the page shows that reason (human_readable)
+    // rather than the generic fallback.
     const urlField = page.getByPlaceholder(/http.*localhost.*8080/i);
     await urlField.fill('http://localhost:1');
 
@@ -166,7 +168,7 @@ test.describe.serial('First boot', () => {
     await page.getByRole('button', { name: /fetch config/i }).click();
 
     // Wait for the error — connecting to :1 will fail quickly
-    await expect(page.getByText(/failed to connect/i)).toBeVisible({ timeout: 15000 });
+    await expect(page.getByText(/private\/reserved address|failed to connect/i)).toBeVisible({ timeout: 15000 });
     // Still on connect step
     await expect(page.getByRole('button', { name: /fetch config/i })).toBeVisible();
   });

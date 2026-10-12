@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+. "$(dirname "$0")/lib.sh"
+trap cleanup_frontend EXIT
+task_start desktop-test cargo pkg-config patchelf
+task_target_dir desktop-test
+prepare_placeholder_frontend
+cargo test --manifest-path desktop/src-tauri/Cargo.toml --all-targets --locked
+show_sccache_stats

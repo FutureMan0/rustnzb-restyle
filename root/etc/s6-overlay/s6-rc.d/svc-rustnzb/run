@@ -1,6 +1,0 @@
-#!/usr/bin/with-contenv sh
-
-exec s6-setuidgid abc rustnzb \
-    --config /config/config.toml \
-    --data-dir /data \
-    --port 9090
