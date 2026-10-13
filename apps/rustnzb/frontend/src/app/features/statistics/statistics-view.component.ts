@@ -306,7 +306,11 @@ type Period = 'today' | 'week' | 'month' | 'lifetime';
 
     @media (max-width: 767px) {
       .section-head { flex-direction: column; align-items: stretch; }
-      .periods { width: 100%; }
+      .periods { width: 100%; box-sizing: border-box; }
+    }
+    /* The shell already shows the large page title below the desktop breakpoint. */
+    @media (max-width: 1023px) {
+      .section-head h2 { display: none; }
     }
   `],
 })

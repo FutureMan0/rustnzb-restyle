@@ -1,0 +1,9 @@
+# Only the fork's own workflows. Cargo/npm updates come from upstream merges;
+# separate bumps here would just conflict with upstream's lockfiles.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5

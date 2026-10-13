@@ -1,0 +1,48 @@
+# CI for this fork on GitHub-hosted runners. Upstream's ci.yml targets its
+# self-hosted runners and is not carried in the fork (see CLAUDE.md).
+name: fork-ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["*.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["*.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/rustnzb/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/rustnzb/frontend/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      - run: npm test -- --coverage --coverage-reporters=text-summary --coverage-reporters=json-summary
+      - working-directory: .
+        run: node ci/check-frontend-coverage.mjs apps/rustnzb/frontend/coverage/frontend/coverage-summary.json ci/frontend-coverage-baseline.json
+      - run: npm run build -- --configuration=production

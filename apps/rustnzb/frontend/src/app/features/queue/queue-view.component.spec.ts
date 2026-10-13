@@ -446,19 +446,29 @@ describe('QueueViewComponent', () => {
     expect(loadQueue).toHaveBeenCalledTimes(1);
   });
 
-  it('reports bulk action failures once with the server message', () => {
-    const notFound = new HttpErrorResponse({
-      status: 404,
-      error: { error_kind: 'job_not_found', human_readable: 'Job not found: job-2', status: 404 },
-    });
-    const { component, snackBar } = makeComponent({
-      post: vi.fn((path: string) => (path.includes('job-2') ? throwError(() => notFound) : of({}))),
+  it('sends bulk actions as one request and reports failures once with the server message', () => {
+    const { component, api, snackBar } = makeComponent({
+      post: vi.fn(() =>
+        of({
+          status: false,
+          succeeded: 1,
+          failed: 1,
+          failures: [
+            {
+              id: 'job-2',
+              error: { error_kind: 'job_not_found', human_readable: 'Job not found: job-2', status: 404 },
+            },
+          ],
+        }),
+      ),
     });
     const loadQueue = vi.spyOn(component, 'loadQueue').mockImplementation(() => {});
     component.selectedIds.set(new Set(['job-1', 'job-2']));
 
     component.bulkPause();
 
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(api.post).toHaveBeenCalledWith('/queue/bulk', { ids: ['job-1', 'job-2'], action: 'pause' });
     expect(snackBar.open).toHaveBeenCalledTimes(1);
     expect(snackBar.open).toHaveBeenCalledWith(
       'Failed to pause 1 of 2 job(s): Job not found: job-2',
@@ -467,6 +477,39 @@ describe('QueueViewComponent', () => {
     );
     expect(loadQueue).toHaveBeenCalledTimes(1);
     expect(component.selectedIds().size).toBe(0);
+  });
+
+  it('passes the value for bulk priority and category changes', () => {
+    const { component, api } = makeComponent({
+      post: vi.fn(() => of({ status: true, succeeded: 1, failed: 0, failures: [] })),
+    });
+    vi.spyOn(component, 'loadQueue').mockImplementation(() => {});
+
+    component.selectedIds.set(new Set(['job-1']));
+    component.bulkPriority(2);
+    component.selectedIds.set(new Set(['job-1']));
+    component.bulkCategory('movies');
+
+    expect(api.post).toHaveBeenNthCalledWith(1, '/queue/bulk', { ids: ['job-1'], action: 'priority', value: 2 });
+    expect(api.post).toHaveBeenNthCalledWith(2, '/queue/bulk', { ids: ['job-1'], action: 'category', value: 'movies' });
+  });
+
+  it('sorts the queue on the server and refreshes', () => {
+    const { component, api } = makeComponent();
+    const loadQueue = vi.spyOn(component, 'loadQueue').mockImplementation(() => {});
+    component.jobs.set([makeJob({ id: 'a' }), makeJob({ id: 'b' })]);
+
+    component.sortQueue('size', 'asc');
+
+    expect(api.post).toHaveBeenCalledWith('/queue/sort', { sort_by: 'size', direction: 'asc' });
+    expect(loadQueue).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show sample jobs unless they were opted into', () => {
+    const { component } = makeComponent();
+    component.loading.set(false);
+    expect(component.inDummyMode()).toBe(false);
+    expect(component.displayJobs()).toEqual([]);
   });
 
   it('does not toast a 401 that the auth interceptor is handling', () => {

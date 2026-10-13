@@ -316,8 +316,23 @@ function wideQuery(): MediaQueryList | undefined {
     .rss-summary { list-style: none; cursor: pointer; padding: 0; margin: 0; }
     .rss-summary::-webkit-details-marker { display: none; }
     .rss-summary h3 { margin: 0; padding: 14px 16px; }
+    .rss-accordion { overflow: hidden; }
+    .rss-accordion:not([open]) .rss-summary h3 { border-bottom: none; }
+    .rss-summary h3::after {
+      content: '';
+      flex-shrink: 0;
+      width: 8px;
+      height: 8px;
+      margin-left: 4px;
+      border-right: 2px solid var(--mute);
+      border-bottom: 2px solid var(--mute);
+      transform: rotate(-45deg);
+      transition: transform 0.15s ease;
+    }
+    .rss-accordion[open] .rss-summary h3::after { transform: rotate(45deg); }
     @media (min-width: 1024px) {
       .rss-summary { cursor: default; }
+      .rss-summary h3::after { display: none; }
     }
   `],
 })

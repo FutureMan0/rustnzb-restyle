@@ -60,12 +60,13 @@ const PAGE_TITLES: Record<string, string> = {
           <div class="topbar-wrap">
             <a routerLink="/queue" class="brand">rust<span>nzb</span></a>
             @if (version()) {
-              <span class="ver app-topbar--mobile-only">v{{ version() }}</span>
+              <span class="ver app-topbar--mobile-only" [attr.title]="'v' + version()">v{{ shortVersion() }}</span>
             }
             <div class="spacer"></div>
             @if (demoMode) {
               <a class="demo-exit" href="/">Exit demo</a>
             }
+            @if (statusLoaded()) {
             <div class="status hide-mobile">
               <span class="app-topbar--live pill" [class.warn]="paused()">
                 <span class="live-dot" [class.pulse]="!paused() && speed() > 0" aria-hidden="true"></span>
@@ -77,10 +78,12 @@ const PAGE_TITLES: Record<string, string> = {
               </span>
               <span class="pill tabular-nums">{{ formatBytes(diskFree()) }} free</span>
             </div>
+            }
             <button
               mat-icon-button
               type="button"
               class="app-topbar--mobile-only"
+              [disabled]="!statusLoaded()"
               (click)="togglePause()"
               [attr.aria-label]="paused() ? 'Resume downloads' : 'Pause downloads'"
             >
@@ -341,16 +344,18 @@ const PAGE_TITLES: Record<string, string> = {
         justify-content: center;
         gap: 2px;
         padding: 6px 4px;
+        min-height: 48px;
         background: none;
         border: none;
         color: var(--text-secondary);
+        font: inherit;
         font-size: 10px;
         font-weight: 500;
         cursor: pointer;
-        font: inherit;
       }
       .more-tab .mi {
         font-size: 22px;
+        line-height: 1;
       }
       .pause-custom {
         display: flex;
@@ -366,14 +371,19 @@ const PAGE_TITLES: Record<string, string> = {
         background: var(--panel2);
         color: var(--text);
       }
+      .app-topbar .ver {
+        font: var(--font-caption);
+        color: var(--mute);
+        white-space: nowrap;
+      }
       .demo-exit {
         border: 1px solid var(--tint);
         border-radius: 8px;
         color: var(--tint);
-        font-weight: 600;
         padding: 4px 10px;
         text-decoration: none;
         font: var(--font-footnote);
+        font-weight: 600;
       }
       .app-topbar--live.warn .live-dot {
         background: var(--warn);
@@ -386,6 +396,10 @@ const PAGE_TITLES: Record<string, string> = {
 export class App implements OnInit, OnDestroy {
   readonly demoMode = isDemoPath(window.location.pathname);
   version = signal('');
+  /** False until the first /status answer, so the header never shows placeholder zeros. */
+  readonly statusLoaded = signal(false);
+  /** Release number without the `+<git sha>` build suffix. */
+  readonly shortVersion = computed(() => this.version().split('+')[0]);
 
   speed = signal(0);
   paused: WritableSignal<boolean>;
@@ -409,7 +423,8 @@ export class App implements OnInit, OnDestroy {
     { label: '1 hour', secs: 60 * 60 },
     { label: '2 hours', secs: 2 * 60 * 60 },
   ];
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private pollTimer: ReturnType<typeof setTimeout> | null = null;
+  private destroyed = false;
   private readonly addSub;
 
   constructor(
@@ -434,12 +449,22 @@ export class App implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.pollStatus();
-    this.pollTimer = setInterval(() => this.pollStatus(), 2000);
+    this.schedulePoll(0);
+  }
+
+  // The session is verified asynchronously after load; until then poll fast so
+  // the header shows real values right away instead of after the first 2s tick.
+  private schedulePoll(delayMs: number): void {
+    this.pollTimer = setTimeout(() => {
+      if (this.destroyed) return;
+      this.pollStatus();
+      this.schedulePoll(this.statusLoaded() ? 2000 : 250);
+    }, delayMs);
   }
 
   ngOnDestroy(): void {
-    if (this.pollTimer) clearInterval(this.pollTimer);
+    this.destroyed = true;
+    if (this.pollTimer) clearTimeout(this.pollTimer);
     this.addSub.unsubscribe();
   }
 
@@ -454,6 +479,7 @@ export class App implements OnInit, OnDestroy {
         this.queueCount.set(s.queue_size);
         this.diskFree.set(s.disk_space_free);
         this.webdavEnabled.set(!!s.webdav_enabled);
+        this.statusLoaded.set(true);
         if (s.version) this.version.set(s.version);
       },
       error: () => {},

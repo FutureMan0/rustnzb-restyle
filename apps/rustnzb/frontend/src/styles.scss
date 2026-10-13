@@ -9,6 +9,13 @@ html {
   ));
 }
 
+/* Width: 100% on a padded field must not push it past its container. */
+input,
+select,
+textarea {
+  box-sizing: border-box;
+}
+
 /* ---- Material 3: Primary an App-Tint koppeln ---- */
 :root {
   --mat-sys-primary: var(--tint);
@@ -1103,8 +1110,8 @@ body[data-width-mode='expanded'] .app-topbar > .wrap {
   font-weight: 600;
 }
 .app-topbar .brand {
-  font-weight: 700;
   font: var(--font-subheadline);
+  font-weight: 700;
   margin-right: 8px;
   white-space: nowrap;
 }

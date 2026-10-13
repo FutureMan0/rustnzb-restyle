@@ -113,6 +113,24 @@ type MaskedJob = NzbJob & { password?: string | null };
         }
       </div>
 
+      @if (categories().length > 0) {
+        <h3 class="section-h">Category</h3>
+        <div class="seg seg--wrap" role="group" aria-label="Change category">
+          @for (c of categories(); track c) {
+            <button
+              type="button"
+              class="seg__btn"
+              [class.seg__btn--on]="job().category === c"
+              [attr.aria-pressed]="job().category === c"
+              [disabled]="actionPending()"
+              (click)="setCategory(c)"
+            >
+              {{ c }}
+            </button>
+          }
+        </div>
+      }
+
       <h3 class="section-h">Order</h3>
       <div class="move-row">
         <button type="button" class="btn" [disabled]="actionPending() || queueIndex() <= 0" (click)="moveTo('top')">Top</button>
@@ -515,6 +533,13 @@ type MaskedJob = NzbJob & { password?: string | null };
       .dim {
         color: var(--mute);
       }
+      .seg--wrap {
+        flex-wrap: wrap;
+        border-radius: var(--radius-card);
+      }
+      .seg--wrap .seg__btn {
+        flex: 1 0 auto;
+      }
       .seg__btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
@@ -536,6 +561,7 @@ export class QueueJobSheetComponent {
   readonly queueIndex = signal(this.data.index);
   readonly total = signal(this.data.total);
   readonly actionPending = signal(false);
+  readonly categories = signal<string[]>([]);
 
   readonly priorityLevels = [
     { v: 0, label: 'Low' },
@@ -560,6 +586,14 @@ export class QueueJobSheetComponent {
         ),
       )
       .subscribe((j) => this.job.set(j));
+
+    this.api
+      .get<{ name: string }[]>('/config/categories')
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (cats) => this.categories.set((cats ?? []).map((c) => c.name)),
+        error: () => {},
+      });
   }
 
   dismiss(): void {
@@ -699,6 +733,18 @@ export class QueueJobSheetComponent {
       this.api.put(`/queue/${id}/priority`, { priority }),
       'Priority updated',
       'Failed to change priority',
+      () => this.job.update((j) => ({ ...j, priority })),
+    );
+  }
+
+  setCategory(category: string): void {
+    if (category === this.job().category) return;
+    const id = this.job().id;
+    this.withPendingAction(
+      this.api.put(`/queue/${id}/category`, { category }),
+      'Category updated',
+      'Failed to change category',
+      () => this.job.update((j) => ({ ...j, category })),
     );
   }
 
@@ -716,10 +762,12 @@ export class QueueJobSheetComponent {
     else if (kind === 'bottom') position = n - 1;
     else if (kind === 'up') position = Math.max(0, cur - 1);
     else if (kind === 'down') position = Math.min(n - 1, cur + 1);
+    if (position === cur) return;
     this.withPendingAction(
       this.api.post(`/queue/${id}/move`, { position }),
       'Queue position updated',
       'Unable to reorder queue',
+      () => this.queueIndex.set(position),
     );
   }
 
@@ -775,17 +823,24 @@ export class QueueJobSheetComponent {
     return Math.max(0, total - downloaded);
   }
 
+  /**
+   * Run one job action. Without `applyLocally` the sheet closes and asks the
+   * list to refresh; with it the sheet stays open and shows the change, and
+   * the queue page picks it up on its next poll.
+   */
   private withPendingAction(
     action: Observable<unknown>,
     successMessage: string,
     failureMessage: string,
+    applyLocally?: () => void,
   ): void {
     if (this.actionPending()) return;
     this.actionPending.set(true);
     action.pipe(finalize(() => this.actionPending.set(false))).subscribe({
       next: () => {
         this.snackBar.open(successMessage, 'Close', { duration: 2500 });
-        this.ref.dismiss('refresh');
+        if (applyLocally) applyLocally();
+        else this.ref.dismiss('refresh');
       },
       error: (err) => showHttpError(this.snackBar, err, failureMessage),
     });

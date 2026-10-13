@@ -76,8 +76,8 @@ function matchNarrow(): MediaQueryList | null {
         @if (!selectedGroup()) {
           <div class="panel">
             <div class="body ctr">
-              <div class="big-hint">Pick a group on the left to browse headers,
-              or use the search bar at the top to query across all subscribed groups.</div>
+              <div class="big-hint">Pick a subscribed group to browse its headers,
+              or use the search bar to query across all subscribed groups.</div>
             </div>
           </div>
         } @else {
@@ -170,6 +170,10 @@ function matchNarrow(): MediaQueryList | null {
     </div>
   `,
   styles: [`
+    @media (max-width: 720px) {
+      .search-bar > input { flex-basis: 100%; }
+      .search-bar > select { flex: 1; min-width: 0; }
+    }
     :host { display: block; }
     .shell { display: grid; grid-template-columns: 260px 1fr; gap: 16px; }
     @media (max-width: 1023px) {

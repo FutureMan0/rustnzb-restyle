@@ -8,6 +8,7 @@ Repository map, build/test commands and engineering rules: **read [AGENTS.md](AG
 - **Web UI design** (`apps/rustnzb/frontend`): Ruddarr/iOS-inspired, mobile-first.
   `styles.scss` tokens (`--tint`, `--card`, `--font-*`, light/dark/OLED palettes, tints),
   `ThemeService` (mode + tint), app shell with sidebar + bottom tab bar + "More" sheet,
+  phone card list instead of the queue table below 720px,
   bottom sheets for Add NZB (`features/queue/add-nzb-sheet`), queue job details
   (`features/queue/queue-job-sheet`) and article preview (`features/groups/article-preview-sheet`).
 - **Routing**: `/queue` and `/history` are separate pages (upstream combines them under
@@ -23,9 +24,27 @@ Repository map, build/test commands and engineering rules: **read [AGENTS.md](AG
 ## Merging upstream
 
 ```bash
-git fetch upstream
-git merge upstream/main
+git switch -c merge/upstream-<version>
+.github/merge-upstream.sh            # or: .github/merge-upstream.sh v1.7.0
 ```
 
-Upstream workflows under `.github/workflows/` (except `docker.yml`) target upstream's
-self-hosted runners; disable them in the fork's Actions settings.
+The script fetches upstream, merges without committing and drops every upstream workflow
+(and `.github/codeql/`). Upstream's workflows run on its self-hosted runners and publish to
+its registry, so in the fork they would hang or collide with `docker.yml` on `v*` tags.
+The fork's own workflows are `docker.yml` (GHCR image) and `fork-ci.yml` (fmt, clippy,
+tests, frontend tests + coverage gate + build on GitHub-hosted runners); keep the list in
+`FORK_WORKFLOWS` in the script in sync when adding one.
+
+After resolving conflicts, check before committing:
+
+```bash
+cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cd apps/rustnzb/frontend && npx ng test --watch=false && npx ng build
+```
+
+On Node 26+ the frontend tests need `NODE_OPTIONS=--no-webstorage` (Node's built-in
+`localStorage` shadows jsdom's); CI uses Node 22.
+
+The upstream Playwright suite (`e2e/`) asserts upstream's markup and `/downloads` routes;
+it is not part of the fork's CI.

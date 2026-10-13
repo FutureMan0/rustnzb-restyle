@@ -55,14 +55,14 @@ const EXPORT_PAGE_SIZE = 200;
       </div>
       <div class="card">
         <div class="label">Success rate</div>
-        <div class="val">{{ statCards().successPct }}%</div>
+        <div class="val">{{ statCards().hasJobs ? statCards().successPct + '%' : '—' }}</div>
         <div class="bar green"><div [style.width.%]="statCards().successPct"></div></div>
         <div class="sub">Of recent jobs</div>
       </div>
       <div class="card">
         <div class="label">Avg job duration</div>
         <div class="val">{{ statCards().avgDurationLabel }}</div>
-        <div class="sub">Download + post-processing</div>
+        <div class="sub">Added to finished, incl. queue wait</div>
       </div>
     </div>
 
@@ -828,6 +828,7 @@ export class HistoryViewComponent implements OnInit, OnDestroy {
       failed,
       failReasons: failed === 0 || !topReasons ? 'none' : topReasons,
       successPct: st?.success_pct ?? 0,
+      hasJobs: (st?.completed ?? 0) + failed > 0,
       avgDurationLabel:
         st?.avg_duration_secs != null ? this.formatShortDuration(st.avg_duration_secs) : '—',
     };

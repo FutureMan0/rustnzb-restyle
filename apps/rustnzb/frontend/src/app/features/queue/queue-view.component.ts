@@ -8,7 +8,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { CdkDragDrop, DragDropModule, moveItemInArray } from '@angular/cdk/drag-drop';
-import { Observable, catchError, finalize, forkJoin, map, of } from 'rxjs';
+import { Observable, finalize } from 'rxjs';
 import { ApiService } from '../../core/services/api.service';
 import { PauseStateService } from '../../core/services/pause-state.service';
 import { NzbJob, PauseReason, QueueResponse, StatusResponse } from '../../core/models/queue.model';
@@ -164,6 +164,22 @@ const PRIORITY_LEVELS = [
   { v: 3, label: 'Force' },
 ] as const;
 
+type QueueSortField = 'remaining' | 'name' | 'size' | 'age' | 'priority';
+
+const SORT_OPTIONS: readonly { label: string; field: QueueSortField; direction: 'asc' | 'desc' }[] = [
+  { label: 'Priority (high first)', field: 'priority', direction: 'desc' },
+  { label: 'Remaining (smallest first)', field: 'remaining', direction: 'asc' },
+  { label: 'Size (smallest first)', field: 'size', direction: 'asc' },
+  { label: 'Age (oldest first)', field: 'age', direction: 'asc' },
+  { label: 'Name (A–Z)', field: 'name', direction: 'asc' },
+];
+
+interface BulkActionResponse {
+  succeeded: number;
+  failed: number;
+  failures: { id: string; error: unknown }[];
+}
+
 @Component({
   selector: 'app-queue-view',
   standalone: true,
@@ -234,7 +250,7 @@ const PRIORITY_LEVELS = [
     <!-- ============ Per-server connection pool ============ -->
     <div class="panel pool-panel" [class.collapsed]="poolCollapsed()">
       <h3>NNTP connection pool
-        <span class="hint">priority failover · TLS via rustls · active transfers</span>
+        <span class="hint">priority failover · active transfers</span>
         <button
           type="button"
           class="collapse-btn"
@@ -283,7 +299,7 @@ const PRIORITY_LEVELS = [
             <span class="sw a">Transferring now</span>
             <span class="sw r">Recent (held 5s)</span>
             <span class="sw f">Free slot</span>
-            <span style="margin-left:auto">Transport: NNTPS · rustls (ring)</span>
+            <span class="transport">{{ transportLabel() }}</span>
           </div>
         </div>
       }
@@ -331,25 +347,40 @@ const PRIORITY_LEVELS = [
           Paused ({{ countJobs('paused') }})
         </button>
       </div>
-      <div class="filter-btn-wrap">
-        <button mat-icon-button type="button" [matMenuTriggerFor]="filterMenu" aria-label="Filter">
-          <mat-icon [class.filter-active]="filterStatus !== 'all'">filter_list</mat-icon>
-        </button>
-        @if (filterStatus !== 'all') {
-          <span class="filter-badge-dot" aria-hidden="true"></span>
+      <button
+        mat-icon-button
+        type="button"
+        [matMenuTriggerFor]="sortMenu"
+        [disabled]="jobs().length < 2"
+        aria-label="Sort queue"
+        title="Sort queue"
+      >
+        <mat-icon>sort</mat-icon>
+      </button>
+      <mat-menu #sortMenu="matMenu">
+        @for (opt of sortOptions; track opt.label) {
+          <button mat-menu-item type="button" (click)="sortQueue(opt.field, opt.direction)">{{ opt.label }}</button>
         }
-        <mat-menu #filterMenu="matMenu">
-          <button mat-menu-item type="button" (click)="filterStatus = 'all'">All</button>
-          <button mat-menu-item type="button" (click)="filterStatus = 'active'">Active</button>
-          <button mat-menu-item type="button" (click)="filterStatus = 'queued'">Queued</button>
-          <button mat-menu-item type="button" (click)="filterStatus = 'paused'">Paused</button>
-        </mat-menu>
-      </div>
+      </mat-menu>
       @if (selectedIds().size > 0) {
         <div class="bulk-bar">
           <span class="bulk-count">{{ selectedIds().size }} selected</span>
           <button type="button" class="btn sm" (click)="bulkResume()" [disabled]="paused()" [attr.title]="paused() ? 'Global pause is active' : null">Start</button>
           <button type="button" class="btn sm" (click)="bulkPause()">Pause</button>
+          <button type="button" class="btn sm" [matMenuTriggerFor]="bulkPriorityMenu">Priority</button>
+          <mat-menu #bulkPriorityMenu="matMenu">
+            @for (p of priorityLevels; track p.v) {
+              <button mat-menu-item type="button" (click)="bulkPriority(p.v)">{{ p.label }}</button>
+            }
+          </mat-menu>
+          @if (categories().length > 0) {
+            <button type="button" class="btn sm" [matMenuTriggerFor]="bulkCategoryMenu">Category</button>
+            <mat-menu #bulkCategoryMenu="matMenu">
+              @for (c of categories(); track c) {
+                <button mat-menu-item type="button" (click)="bulkCategory(c)">{{ c }}</button>
+              }
+            </mat-menu>
+          }
           <button type="button" class="btn sm danger" (click)="bulkDelete()">Delete</button>
           <button type="button" class="btn sm ghost" (click)="clearSelection()" aria-label="Clear selection">✕</button>
         </div>
@@ -403,13 +434,13 @@ const PRIORITY_LEVELS = [
                     </span>
                   </th>
                   <th class="col-name">Name</th>
-                  <th>Size</th>
-                  <th>Progress</th>
-                  <th>Speed</th>
-                  <th>ETA</th>
-                  <th>Status</th>
-                  <th>Priority</th>
-                  <th></th>
+                  <th class="col-size">Size</th>
+                  <th class="col-progress">Progress</th>
+                  <th class="col-speed">Speed</th>
+                  <th class="col-eta">ETA</th>
+                  <th class="col-status">Status</th>
+                  <th class="col-priority">Priority</th>
+                  <th class="col-actions"><span class="sr-only">Actions</span></th>
                 </tr>
               </thead>
               <tbody
@@ -477,10 +508,10 @@ const PRIORITY_LEVELS = [
                         </div>
                       }
                     </td>
-                    <td class="tabular-nums" (click)="$event.stopPropagation()">
+                    <td class="tabular-nums col-size" (click)="$event.stopPropagation()">
                       {{ formatBytes(job.total_bytes) }}
                     </td>
-                    <td (click)="$event.stopPropagation()">
+                    <td class="col-progress" (click)="$event.stopPropagation()">
                       <div
                         class="progress"
                         [class.pp]="isPostProc(rowStatus(job))"
@@ -575,6 +606,87 @@ const PRIORITY_LEVELS = [
               </tbody>
             </table>
           </div>
+
+          <!-- Phone: one card-style row per job instead of a squeezed table. -->
+          <ul
+            class="q-list"
+            cdkDropList
+            [cdkDropListDisabled]="!canDragInTable()"
+            (cdkDropListDropped)="onQueueDrop($event)"
+          >
+            @for (job of filteredJobs(); track job.id) {
+              <li class="q-li" cdkDrag [cdkDragData]="job" [cdkDragDisabled]="!canDragInTable()">
+                @if (canDragInTable()) {
+                  <span class="q-li__drag" cdkDragHandle aria-label="Reorder">
+                    <mat-icon>drag_indicator</mat-icon>
+                  </span>
+                }
+                <input
+                  class="q-cb q-li__cb"
+                  type="checkbox"
+                  [attr.aria-label]="'Select ' + job.name"
+                  [checked]="selectedIds().has(job.id)"
+                  (change)="toggleSelected(job.id)"
+                />
+                <button type="button" class="q-li__main" (click)="openJobSheet(job)">
+                  <span class="q-li__name job-name">{{ job.name }}</span>
+                  <span class="q-li__meta">
+                    <span
+                      class="status-pill"
+                      [class]="statusClass(rowStatus(job))"
+                      >{{ statusLabel(job) }}</span
+                    >
+                    @if (job.category) {
+                      <span class="tag cat">{{ job.category }}</span>
+                    }
+                    @if (job.priority !== 1) {
+                      <span class="q-li__prio">{{ priorityLabel(job.priority) }}</span>
+                    }
+                  </span>
+                  <span
+                    class="progress q-li__bar"
+                    [class.pp]="isPostProc(rowStatus(job))"
+                    [class.done]="rowStatus(job) === 'completed'"
+                  >
+                    <span class="q-li__fill" [style.width.%]="percent(job)"></span>
+                  </span>
+                  <span class="q-li__sub tabular-nums">
+                    @if (isPostProc(job.status)) {
+                      {{ displayStatus(job.status) }} · {{ percent(job) }}%
+                    } @else {
+                      {{ formatBytes(job.downloaded_bytes) }} / {{ formatBytes(job.total_bytes) }}
+                    }
+                    @if (shouldShowLiveMetrics(job) && job.speed_bps > 0) {
+                      · {{ formatSpeed(job.speed_bps) }} · {{ eta(job) }}
+                    }
+                  </span>
+                  @if (job.articles_failed > 0) {
+                    <span class="article-failures">{{ failedArticlesLabel(job.articles_failed) }}</span>
+                  }
+                  @if (job.error_message) {
+                    <span class="job-status-message">{{ job.error_message }}</span>
+                  }
+                </button>
+                @if (rowStatus(job) === 'paused') {
+                  <button
+                    type="button"
+                    class="q-li__act"
+                    [disabled]="paused() || isDemoJob(job) || isActionPending(job.id)"
+                    [attr.aria-label]="'Resume ' + job.name"
+                    (click)="resumeJob(job.id)"
+                  ><mat-icon>play_arrow</mat-icon></button>
+                } @else if (rowStatus(job) !== 'completed' && rowStatus(job) !== 'failed') {
+                  <button
+                    type="button"
+                    class="q-li__act"
+                    [disabled]="paused() || isDemoJob(job) || isActionPending(job.id)"
+                    [attr.aria-label]="'Pause ' + job.name"
+                    (click)="pauseJob(job.id)"
+                  ><mat-icon>pause</mat-icon></button>
+                }
+              </li>
+            }
+          </ul>
         }
       </div>
     </div>
@@ -599,6 +711,12 @@ const PRIORITY_LEVELS = [
       flex-wrap: wrap;
       align-items: baseline;
       gap: 4px 8px;
+    }
+    .queue-tasks-panel h3 .hint {
+      margin-left: 0;
+    }
+    .queue-tasks-panel h3 .paused-hint {
+      margin-left: auto;
     }
     .q-th-drag {
       width: 36px;
@@ -687,43 +805,6 @@ const PRIORITY_LEVELS = [
       padding: 28px 16px 32px;
       margin: 0;
     }
-    .q-item__title-line {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      min-width: 0;
-      width: 100%;
-    }
-    .q-item__title-line .q-item__title {
-      flex: 1;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .q-item__title-line .tag {
-      flex-shrink: 0;
-      max-width: 40%;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    /* NOTE: keep table cells as table-cells (no flex on <td>). Drag behavior is on the inner handle. */
-    .q-row.cdk-drag-preview {
-      box-sizing: border-box;
-      display: flex;
-      align-items: stretch;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: var(--radius-row);
-      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
-      padding-right: 4px;
-    }
-    .q-row .cdk-drag-placeholder {
-      opacity: 0.25;
-      min-height: 48px;
-      background: var(--panel2);
-    }
     .tbl-scroll {
       max-width: 100%;
       overflow-x: auto;
@@ -738,7 +819,26 @@ const PRIORITY_LEVELS = [
       min-width: 640px;
     }
     :host ::ng-deep .tbl-queue .col-name {
-      width: 28%;
+      width: auto;
+    }
+    /* Border-box widths: the number is the whole column, padding included. */
+    :host ::ng-deep .tbl-queue th { box-sizing: border-box; }
+    :host ::ng-deep .tbl-queue th.q-th-drag,
+    :host ::ng-deep .tbl-queue th.q-td-cb { width: 40px; }
+    :host ::ng-deep .tbl-queue th.col-size { width: 80px; }
+    :host ::ng-deep .tbl-queue th.col-progress { width: 140px; }
+    :host ::ng-deep .tbl-queue th.col-speed { width: 88px; }
+    :host ::ng-deep .tbl-queue th.col-eta { width: 72px; }
+    :host ::ng-deep .tbl-queue th.col-status { width: 112px; }
+    :host ::ng-deep .tbl-queue th.col-priority { width: 112px; }
+    :host ::ng-deep .tbl-queue th.col-actions { width: 76px; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
     }
     :host ::ng-deep .tbl-queue .q-th-drag,
     :host ::ng-deep .tbl-queue .q-td-drag {
@@ -865,7 +965,7 @@ const PRIORITY_LEVELS = [
     :host ::ng-deep table.data td { padding: 6px 10px; }
     :host ::ng-deep .status-pill { font-size: 10px; padding: 1px 6px; }
     :host ::ng-deep .tag { font-size: 10px; padding: 0 5px; }
-    :host ::ng-deep .progress { width: 112px; height: 5px; }
+    :host ::ng-deep .progress { width: 100%; max-width: 120px; height: 5px; }
 
     /* Connection pool — heavily compacted per design feedback. */
     .panel.pool-panel { font-size: 10.5px; }
@@ -888,15 +988,12 @@ const PRIORITY_LEVELS = [
     .conn-grid { display: grid; grid-template-columns: repeat(40, 1fr); gap: 2px; }
     .conn-grid .c { height: 8px; border-radius: 1px; background: var(--panel2); }
     .conn-grid .c.active { background: var(--accent2); }
-    .conn-grid .c.idle   { background: var(--accent); }
-    .conn-grid .c.err    { background: var(--danger); opacity: .6; }
     .legend { display: flex; gap: 10px; font-size: 10px; color: var(--mute); margin-top: 6px; align-items: center; }
     .legend .sw { display: inline-flex; align-items: center; }
+    .legend .transport { margin-left: auto; }
     .legend .sw::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
     .legend .a::before { background: var(--accent2); }
-    .legend .i::before { background: var(--accent); }
     .legend .f::before { background: var(--panel2); border: 1px solid var(--line); }
-    .legend .e::before { background: var(--danger); opacity: .6; }
     .empty { color: var(--mute); font-size: 13px; padding: 4px 0; }
     .empty a { margin-left: 4px; }
 
@@ -1048,89 +1145,8 @@ const PRIORITY_LEVELS = [
       color: var(--text-secondary);
       font: var(--font-subheadline);
     }
-    .queue-inset {
-      max-width: none;
-    }
-    .q-row {
-      display: flex;
-      align-items: stretch;
-      border-bottom: 1px solid var(--line);
-    }
-    .q-row:last-child {
-      border-bottom: none;
-    }
-    .q-row .q-cb {
-      align-self: center;
-      width: 20px;
-      margin: 0 4px 0 8px;
-      flex-shrink: 0;
-    }
-    .q-row .q-item {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      border-bottom: none;
-      flex: 1;
-      min-width: 0;
-    }
-    .q-item__dot {
-      flex-shrink: 0;
-      width: 9px;
-      height: 9px;
-      border-radius: 50%;
-      background: var(--text-secondary);
-      box-shadow: 0 0 0 1px var(--line);
-    }
-    .q-item__dot.q-dot--dl { background: var(--tint); }
-    .q-item__dot.q-dot--q { background: var(--warn); }
-    .q-item__dot.q-dot--paused { background: #eab308; }
-    .q-item__dot.q-dot--pp { background: var(--accent2); }
-    .q-item__dot.q-dot--fail { background: var(--danger); }
-    .q-item__dot.q-dot--pulse { animation: pulse-live 1.2s var(--ease-out-soft) infinite; }
-    .q-vbar {
-      width: 4px;
-      height: 44px;
-      align-self: center;
-      flex-shrink: 0;
-      background: var(--panel2);
-      border-radius: 2px;
-      position: relative;
-      overflow: hidden;
-    }
-    .q-vbar__fill {
-      position: absolute;
-      bottom: 0;
-      left: 0;
-      right: 0;
-      background: var(--tint);
-      min-height: 0;
-      transition: height 0.25s var(--ease-out-soft);
-    }
-    .q-vbar.pp .q-vbar__fill { background: var(--purple); }
-    .q-row__quick {
-      display: none;
-      flex-direction: column;
-      justify-content: center;
-      gap: 1px;
-      padding-right: 4px;
-      flex-shrink: 0;
-    }
     @media (min-width: 1024px) {
-      .q-row:hover .q-row__quick { display: flex; }
     }
-    .q-mini {
-      width: 30px;
-      min-height: 30px;
-      padding: 0;
-      font-size: 12px;
-      line-height: 1;
-      border: none;
-      background: var(--panel2);
-      color: var(--tint);
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    .q-mini:disabled { opacity: 0.3; cursor: not-allowed; }
     .dummy-banner {
       display: flex;
       align-items: center;
@@ -1199,9 +1215,111 @@ const PRIORITY_LEVELS = [
 
       /* Make name breathe; keep progress compact */
       :host ::ng-deep .tbl-queue .col-name { width: 52%; }
+      :host ::ng-deep .tbl-queue th.col-size { width: auto; }
+      :host ::ng-deep .tbl-queue th.col-progress { width: 96px; }
+      :host ::ng-deep .tbl-queue th.col-status { width: auto; }
       :host ::ng-deep .progress { width: 92px; }
       :host ::ng-deep .status-pill { max-width: 90px; }
+
+      /* One swipeable row of filter chips instead of wrapping. */
+      .filter-chips {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        scrollbar-width: none;
+        margin: 0 -4px;
+        padding: 0 4px;
+      }
+      .filter-chips::-webkit-scrollbar { display: none; }
+      .chip { flex-shrink: 0; white-space: nowrap; }
+
+      :host ::ng-deep .card .val.val-premium { font-size: 17px; }
+      .pool-panel h3 .hint { display: none; }
+      .legend { flex-wrap: wrap; row-gap: 4px; }
+      .legend .transport { display: none; }
     }
+
+    /* Phone list (replaces the table below 720px). */
+    .q-list { display: none; list-style: none; margin: 0; padding: 0; }
+    @media (max-width: 720px) {
+      .tbl-scroll { display: none; }
+      .q-list { display: block; }
+      .queue-toolbar { flex-wrap: nowrap; }
+      .bulk-bar { order: 3; }
+      .queue-toolbar:has(.bulk-bar) { flex-wrap: wrap; }
+    }
+    .q-li {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px 10px 6px;
+      border-bottom: 1px solid var(--line);
+      background: var(--card);
+    }
+    .q-li:last-child { border-bottom: none; }
+    .q-li.cdk-drag-preview {
+      border-radius: var(--radius-row);
+      box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+    }
+    .q-li.cdk-drag-placeholder { opacity: 0.3; }
+    .q-list.cdk-drop-list-dragging .q-li:not(.cdk-drag-placeholder) {
+      transition: transform 0.2s ease;
+    }
+    .q-li__drag {
+      display: inline-flex;
+      color: var(--mute);
+      touch-action: none;
+      cursor: grab;
+      padding: 6px 0;
+    }
+    .q-li__drag mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .q-li__cb { flex-shrink: 0; }
+    .q-li__main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 0;
+      border: none;
+      background: none;
+      color: inherit;
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+    .q-li__name {
+      font: var(--font-subheadline);
+      font-weight: 600;
+      color: var(--text);
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
+      overflow: hidden;
+      word-break: break-word;
+    }
+    .q-li__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .q-li__prio { font: var(--font-caption); color: var(--text-secondary); }
+    :host ::ng-deep .progress.q-li__bar { display: block; width: 100%; max-width: none; height: 4px; }
+    .q-li__fill { display: block; height: 100%; background: var(--tint); transition: width 0.3s; }
+    .q-li__bar.pp .q-li__fill { background: var(--purple); }
+    .q-li__bar.done .q-li__fill { background: var(--accent2); }
+    .q-li__sub { font: var(--font-caption); color: var(--mute); }
+    .q-li .article-failures,
+    .q-li .job-status-message { font: var(--font-caption); white-space: normal; }
+    .q-li__act {
+      flex-shrink: 0;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: none;
+      background: color-mix(in srgb, var(--tint) 14%, var(--panel2));
+      color: var(--tint);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .q-li__act:disabled { opacity: 0.35; cursor: not-allowed; }
 
     /* Upstream additions rendered in the compact queue design. */
     .sub-warn { color: var(--warn); }
@@ -1233,6 +1351,8 @@ const PRIORITY_LEVELS = [
       color: var(--mute);
       font-size: 10px;
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     :host ::ng-deep .tbl-queue .article-failures { text-align: left; }
     select.pri-pill {
@@ -1269,6 +1389,8 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   private lastSpeedBps = 0;
 
   readonly priorityLevels = PRIORITY_LEVELS;
+  readonly sortOptions = SORT_OPTIONS;
+  categories = signal<string[]>([]);
 
   /** When showing the sample queue, id order after drag (preview only); `null` = default. */
   private readonly demoIdOrder = signal<string[] | null>(null);
@@ -1395,9 +1517,11 @@ export class QueueViewComponent implements OnInit, OnDestroy {
 
   private readQueueDummyPref(): boolean {
     try {
-      return localStorage.getItem('rustnzb.queueShowDummy') !== 'false';
+      // Opt-in only: fake rows in an empty queue read as real jobs that
+      // cannot be paused, removed or opened.
+      return localStorage.getItem('rustnzb.queueShowDummy') === 'true';
     } catch {
-      return true;
+      return false;
     }
   }
 
@@ -1443,6 +1567,14 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   private loadAll(): void {
     this.loadQueue();
     this.loadServers();
+    this.loadCategories();
+  }
+
+  private loadCategories(): void {
+    this.api.get<{ name: string }[]>('/config/categories').subscribe({
+      next: (cats) => this.categories.set((cats ?? []).map((c) => c.name)),
+      error: () => {},
+    });
   }
 
   /**
@@ -1532,6 +1664,14 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   });
 
   serversEnabled = computed(() => this.displayServers().filter((s) => s.enabled).length);
+  transportLabel = computed(() => {
+    const enabled = this.displayServers().filter((s) => s.enabled);
+    const tls = enabled.filter((s) => s.ssl).length;
+    if (enabled.length === 0) return '';
+    if (tls === enabled.length) return 'Transport: NNTPS · rustls';
+    if (tls === 0) return 'Transport: plain NNTP';
+    return 'Transport: NNTPS + plain NNTP';
+  });
   connsTotal = computed(() =>
     this.displayServers()
       .filter((s) => s.enabled)
@@ -1871,6 +2011,15 @@ export class QueueViewComponent implements OnInit, OnDestroy {
     return nextJobs;
   }
 
+  /** Server-side sort of the whole queue; the next refresh shows the new order. */
+  sortQueue(field: QueueSortField, direction: 'asc' | 'desc'): void {
+    if (this.jobs().length < 2 || this.reorderPending()) return;
+    this.api.post('/queue/sort', { sort_by: field, direction }).subscribe({
+      next: () => this.loadQueue(),
+      error: (err) => showHttpError(this.snackBar, err, 'Unable to sort queue'),
+    });
+  }
+
   // ---- Bulk ----
 
   toggleSelected(id: string): void {
@@ -1901,40 +2050,43 @@ export class QueueViewComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Run one request per selected job and report failures once, with the
-   * first server message, instead of silently dropping them.
+   * Apply one action to every selected job with a single `/queue/bulk`
+   * request, and report partial failures once with the first server message.
    */
-  private runBulk(
-    ids: string[],
-    request: (id: string) => Observable<unknown>,
-    verb: string,
-  ): void {
+  private runBulk(ids: string[], action: string, verb: string, value?: unknown): void {
     this.clearSelection();
     if (ids.length === 0) return;
-    forkJoin(
-      ids.map((id) =>
-        request(id).pipe(
-          map(() => null),
-          catchError((err: unknown) => of(err)),
-        ),
-      ),
-    ).subscribe((results) => {
-      const failures = results.filter((r) => r !== null && !isAuthHandledError(r));
-      if (failures.length > 0) {
-        showHttpError(
-          this.snackBar,
-          failures[0],
-          `Failed to ${verb} ${failures.length} of ${ids.length} job(s)`,
-        );
-      }
-      this.loadQueue();
+    const body: Record<string, unknown> = { ids, action };
+    if (value !== undefined) body['value'] = value;
+    this.api.post<BulkActionResponse>('/queue/bulk', body).subscribe({
+      next: (r) => {
+        const failed = r?.failed ?? 0;
+        if (failed > 0) {
+          showHttpError(
+            this.snackBar,
+            r.failures?.[0] ?? null,
+            `Failed to ${verb} ${failed} of ${ids.length} job(s)`,
+          );
+        }
+        this.loadQueue();
+      },
+      error: (err) => {
+        showHttpError(this.snackBar, err, `Failed to ${verb} ${ids.length} job(s)`);
+        this.loadQueue();
+      },
     });
   }
   bulkResume(): void {
-    this.runBulk(this.selectedRealIds(), (id) => this.api.post(`/queue/${id}/resume`), 'resume');
+    this.runBulk(this.selectedRealIds(), 'resume', 'resume');
   }
   bulkPause(): void {
-    this.runBulk(this.selectedRealIds(), (id) => this.api.post(`/queue/${id}/pause`), 'pause');
+    this.runBulk(this.selectedRealIds(), 'pause', 'pause');
+  }
+  bulkPriority(priority: number): void {
+    this.runBulk(this.selectedRealIds(), 'priority', 'change priority of', priority);
+  }
+  bulkCategory(category: string): void {
+    this.runBulk(this.selectedRealIds(), 'category', 'change category of', category);
   }
   bulkDelete(): void {
     const ids = this.selectedRealIds();
@@ -1951,7 +2103,7 @@ export class QueueViewComponent implements OnInit, OnDestroy {
       })
       .subscribe((ok) => {
         if (!ok) return;
-        this.runBulk(ids, (id) => this.api.delete(`/queue/${id}`), 'remove');
+        this.runBulk(ids, 'delete', 'remove');
       });
   }
 
