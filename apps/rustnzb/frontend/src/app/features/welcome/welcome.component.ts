@@ -274,7 +274,7 @@ interface ImportPreview {
   styles: [`
     .welcome-wrapper {
       display: flex; align-items: flex-start; justify-content: center;
-      min-height: 100vh; background: var(--bg); padding: 40px 16px;
+      min-height: 100dvh; box-sizing: border-box; background: var(--bg); padding: 40px 16px;
     }
 
     .welcome-card {

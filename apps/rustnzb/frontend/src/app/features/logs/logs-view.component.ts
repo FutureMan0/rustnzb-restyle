@@ -85,7 +85,7 @@ interface LogsResponse {
     .logs {
       font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
       padding: 10px 14px;
-      max-height: calc(100vh - 260px);
+      max-height: calc(100dvh - 260px);
       overflow: auto;
     }
     .logs .l {

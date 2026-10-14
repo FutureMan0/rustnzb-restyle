@@ -203,16 +203,17 @@ const PAGE_TITLES: Record<string, string> = {
   `,
   styles: [
     `
+      /* dvh: on phones 100vh includes the area behind the browser toolbars. */
       :host {
         display: block;
-        height: 100vh;
-        overflow: hidden;
+        height: 100dvh;
+        overflow-y: auto;
       }
       .shell {
         display: grid;
         grid-template-columns: 1fr;
         grid-template-rows: auto 1fr;
-        height: 100vh;
+        height: 100dvh;
         min-width: 0;
         overflow: hidden;
       }
@@ -274,7 +275,7 @@ const PAGE_TITLES: Record<string, string> = {
         .sidebar-wrap {
           position: sticky;
           top: 0;
-          height: calc(100vh - 52px);
+          height: calc(100dvh - 52px);
           min-height: 0;
           display: flex;
           flex-direction: column;

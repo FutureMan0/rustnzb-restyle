@@ -216,7 +216,7 @@ function matchNarrow(): MediaQueryList | null {
       outline: none;
     }
     .side-filter input:focus { border-color: var(--accent); }
-    .side-list { max-height: calc(100vh - 260px); overflow-y: auto; }
+    .side-list { max-height: calc(100dvh - 260px); overflow-y: auto; }
     .g {
       padding: 8px 14px;
       border-bottom: 1px solid var(--line);

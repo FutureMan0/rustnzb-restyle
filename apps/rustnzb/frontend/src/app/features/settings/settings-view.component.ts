@@ -1546,7 +1546,7 @@ function isInt(value: unknown): value is number {
 
     /* Long sidebars stay reachable on short viewports. */
     .settings-side {
-      max-height: calc(100vh - 32px);
+      max-height: calc(100dvh - 32px);
       overflow-y: auto;
       box-sizing: border-box;
     }
