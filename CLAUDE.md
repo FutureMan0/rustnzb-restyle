@@ -19,7 +19,18 @@ Repository map, build/test commands and engineering rules: **read [AGENTS.md](AG
 - **Packaging**: GHCR workflow `.github/workflows/docker.yml` + `docker-bake.hcl` (builds the
   cross toolchain from `Dockerfile.ci` because upstream's toolchain image lives in a private
   registry), `docker-compose.yml` with `direct` / `vpn` (Gluetun/ProtonVPN) profiles,
-  `docs/unraid.md`.
+  `docs/unraid.md`. `.gitea/workflows/image.yml` builds the same image with the same bake
+  file on a self-hosted Gitea runner and pushes it to that Gitea's container registry
+  (repo variable `REGISTRY`; pushes with the job token, or a `REGISTRY_TOKEN` secret if set).
+
+## Two remotes, two CIs
+
+The working copy pushes every commit to a private Gitea repo and to the public GitHub fork.
+Gitea Actions reads `.gitea/workflows` and, as long as that directory exists, ignores
+`.github/workflows`; GitHub never reads `.gitea/`. So `docker.yml` and `fork-ci.yml` run
+only on GitHub and `image.yml` only on Gitea. Deleting `.gitea/workflows` would make Gitea
+run the GitHub workflows, and `docker.yml` would fail at the GHCR login. Keep hostnames and
+tokens out of `.gitea/` (the repo is public); they live in the Gitea repo settings.
 
 ## Merging upstream
 
@@ -33,7 +44,8 @@ The script fetches upstream, merges without committing and drops every upstream 
 its registry, so in the fork they would hang or collide with `docker.yml` on `v*` tags.
 The fork's own workflows are `docker.yml` (GHCR image) and `fork-ci.yml` (fmt, clippy,
 tests, frontend tests + coverage gate + build on GitHub-hosted runners); keep the list in
-`FORK_WORKFLOWS` in the script in sync when adding one.
+`FORK_WORKFLOWS` in the script in sync when adding one. The script does not touch
+`.gitea/` (upstream has none).
 
 After resolving conflicts, check before committing:
 

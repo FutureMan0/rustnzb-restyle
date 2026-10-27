@@ -1,0 +1,73 @@
+# Image build for a self-hosted Gitea mirror of this fork. GitHub ignores
+# .gitea/, and Gitea runs only .gitea/workflows while this directory exists,
+# so docker.yml and fork-ci.yml stay GitHub-only.
+#
+# The runner mounts its host's Docker socket into the job, so the build runs
+# on the host daemon (buildx "docker" driver) and keeps its layer and cargo
+# caches between runs. Same recipe as docker.yml: docker-bake.hcl, amd64.
+#
+# Repository settings (Settings -> Actions):
+#   variable REGISTRY        registry host of the Gitea instance
+#   secret   REGISTRY_TOKEN  optional: access token of the repo owner with
+#                            write:package, if the job token may not push
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths-ignore: ["*.md", "docs/**"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      REGISTRY: ${{ vars.REGISTRY }}
+      IMAGE: ${{ vars.REGISTRY }}/${{ github.repository_owner }}/${{ github.event.repository.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to the registry
+        env:
+          REGISTRY_USER: ${{ github.repository_owner }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITEA_TOKEN }}
+        run: |
+          test -n "$REGISTRY" || { echo "variable REGISTRY is not set" >&2; exit 1; }
+          printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+
+      - name: Build and push
+        env:
+          RUSTNZB_BUILD_REF: ${{ github.sha }}
+        run: |
+          set -eu
+          short=$(git rev-parse --short=7 HEAD)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version=$GITHUB_REF_NAME
+            tags="--set rustnzb.tags=$IMAGE:$GITHUB_REF_NAME"
+            export RELEASE_OPTIMIZED=true
+          else
+            version=latest
+            tags="--set rustnzb.tags=$IMAGE:latest"
+          fi
+          # shellcheck disable=SC2086
+          docker buildx bake -f docker-bake.hcl --progress=plain --push \
+            $tags \
+            --set "rustnzb.tags=$IMAGE:sha-$short" \
+            --set "rustnzb.labels.org.opencontainers.image.title=${{ github.event.repository.name }}" \
+            --set "rustnzb.labels.org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --set "rustnzb.labels.org.opencontainers.image.revision=$GITHUB_SHA" \
+            --set "rustnzb.labels.org.opencontainers.image.version=$version" \
+            --set "rustnzb.labels.org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            rustnzb
+
+      - name: Show the pushed digest
+        run: docker buildx imagetools inspect "$IMAGE:sha-$(git rev-parse --short=7 HEAD)" | head -n 3
+
+      # The docker driver keeps every pushed image in the host's image store;
+      # drop the ones a newer build has untagged.
+      - name: Prune untagged images of this repo
+        if: always()
+        run: docker image prune -f --filter "label=org.opencontainers.image.title=${{ github.event.repository.name }}"
