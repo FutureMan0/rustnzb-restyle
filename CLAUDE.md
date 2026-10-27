@@ -21,7 +21,8 @@ Repository map, build/test commands and engineering rules: **read [AGENTS.md](AG
   registry), `docker-compose.yml` with `direct` / `vpn` (Gluetun/ProtonVPN) profiles,
   `docs/unraid.md`. `.gitea/workflows/image.yml` builds the same image with the same bake
   file on a self-hosted Gitea runner and pushes it to that Gitea's container registry
-  (repo variable `REGISTRY`; pushes with the job token, or a `REGISTRY_TOKEN` secret if set).
+  (variable `REGISTRY`, secret `REGISTRY_TOKEN` with `write:package`; Gitea's job token
+  is refused at the registry login with "unauthorized").
 
 ## Two remotes, two CIs
 

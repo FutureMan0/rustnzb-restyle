@@ -6,10 +6,11 @@
 # on the host daemon (buildx "docker" driver) and keeps its layer and cargo
 # caches between runs. Same recipe as docker.yml: docker-bake.hcl, amd64.
 #
-# Repository settings (Settings -> Actions):
-#   variable REGISTRY        registry host of the Gitea instance
-#   secret   REGISTRY_TOKEN  optional: access token of the repo owner with
-#                            write:package, if the job token may not push
+# Settings (Settings -> Actions):
+#   variable REGISTRY        registry host of the Gitea instance (repo level)
+#   secret   REGISTRY_TOKEN  access token of the repo owner with write:package
+#                            (repo or user level). The job token is refused at
+#                            the registry login ("unauthorized").
 name: image
 
 on:
@@ -33,9 +34,10 @@ jobs:
       - name: Log in to the registry
         env:
           REGISTRY_USER: ${{ github.repository_owner }}
-          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN || secrets.GITEA_TOKEN }}
+          REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
           test -n "$REGISTRY" || { echo "variable REGISTRY is not set" >&2; exit 1; }
+          test -n "$REGISTRY_TOKEN" || { echo "secret REGISTRY_TOKEN is not set" >&2; exit 1; }
           printf '%s' "$REGISTRY_TOKEN" | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
 
       - name: Build and push
